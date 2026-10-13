@@ -26,6 +26,25 @@
 
 环境变量 `MEMLITE_API_BASE` / `MEMLITE_API_KEY` / `MEMLITE_EMBED_MODEL` 覆盖之。endpoint 兼容 OpenAI `/embeddings` 契约（硅基流动、DeepSeek、OpenAI、自建 vLLM/Ollama 皆可）。
 
+## 项目级记忆（工作区优先）
+
+工作区里有含 `config.json` 的 `.memlite/` 或 `memlite-data/` 文件夹（从 cwd 向上找，不越过 git 根）→ 该项目的记忆读写全部落它，不落用户级库；找不到才回用户级。项目级 data_dir 随工作区 git 一起 `memlite sync`（提交进外层仓）。
+
+## 分层配置
+
+`~/.memlite/config.json`（用户级/全局）与项目级文件夹内 `config.json` 合并，项目级覆盖用户级，env 最后覆盖。向量 API 默认写用户级：
+
+```bash
+memlite config set embedding.api_base http://127.0.0.1:18321/v1
+memlite config set embedding.model bge-m3-local
+memlite config set embedding.api_key <key>
+memlite config show        # 合并视图（api_key 脱敏）
+```
+
+## 敏感闸（默认拒入）
+
+`remember`/`update` 写前扫描：明文口令（含「密码是xxx」口语式）、身份证、手机号、银行卡（Luhn）、JWT、PEM 私钥、常见 token 前缀——命中即拒（exit 3），改存位置指针（如「密码在 ~/.env」）。暂无强制入库口子，宁严勿松。
+
 ## 命令
 
 ```bash
