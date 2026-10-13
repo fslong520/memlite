@@ -61,7 +61,7 @@ memlite-data/
 
 | 软件 | 路径 | 方式 |
 |---|---|---|
-| Qoder | `~/.qoder/rules/memlite.md` | 独立规则文件（rules 是 Qoder 唯一全文载体） |
+| Qoder | `~/.qoder/rules/xiaoyu-default.md` | 手工管理全文（不走 inject——再注一份会成双 always_on） |
 | Claude Code | `~/.claude/CLAUDE.md` | 块嵌 `<!-- memlite:begin/end -->` |
 | Codex | `~/.codex/AGENTS.md` | 块嵌 |
 | CodeBuddy | `~/.codebuddy/CODEBUDDY.md` | 块嵌 |

@@ -29,7 +29,8 @@ END = "<!-- memlite:end -->"
 CONFLICT_MARKERS = ("respire", "1memory", "rsrs recall", "rsrs remember", "忆时")
 
 TARGETS: dict[str, str] = {
-    "qoder": "~/.qoder/rules/memlite.md",
+    # qoder 不在表内：其 rules 全文由 ~/.qoder/rules/xiaoyu-default.md 手工管理，
+    # 再注入 memlite.md 会成第二份 always_on 规则，双份铁律致遗忘（前科 f2886a99）。
     "claude": "~/.claude/CLAUDE.md",
     "codex": "~/.codex/AGENTS.md",
     "codebuddy": "~/.codebuddy/CODEBUDDY.md",
