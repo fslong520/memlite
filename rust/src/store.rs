@@ -221,6 +221,7 @@ impl Store {
         self.records.values().collect()
     }
 
+    #[allow(dead_code)] // bin 主流程用 resolve；测试与库消费者用 get
     pub fn get(&self, rid: &str) -> Option<&Record> {
         self.records.get(rid)
     }

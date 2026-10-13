@@ -1,9 +1,11 @@
 //! memlite CLI——简化嵌入式记忆系统（Rust 版）。
 //! 命令面与 Python 版对齐：init/remember/recall/show/list/forget/sync/inject/reembed/status/compact。
 
+mod config;
 mod embed;
 mod inject;
 mod search;
+mod sensitive;
 mod store;
 mod sync;
 mod vectors;
@@ -93,31 +95,30 @@ enum Cmd {
     Status,
     /// 压实（只留存活重写回单文件）
     Compact,
+    /// 查看/写配置（分层：项目级 > 用户级；set 缺省写用户级，--project 写项目级）
+    Config {
+        #[command(subcommand)]
+        action: ConfigCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigCmd {
+    /// 打印合并后的配置（api_key 脱敏）
+    Show,
+    /// 写一项：key 形如 data_dir / embedding.api_base / embedding.api_key / embedding.model
+    Set {
+        key: String,
+        value: String,
+        /// 写项目级（须在含 .memlite/ 或 memlite-data/config.json 的工作区内）
+        #[arg(long)]
+        project: bool,
+    },
 }
 
 fn data_dir(arg: &Option<PathBuf>) -> PathBuf {
-    if let Some(d) = arg {
-        return d.clone();
-    }
-    if let Ok(v) = std::env::var("MEMLITE_DATA") {
-        return PathBuf::from(v);
-    }
-    // config.json 的 data_dir
-    let cfg = std::env::var("MEMLITE_CONFIG")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-            PathBuf::from(home).join(".memlite/config.json")
-        });
-    if let Ok(text) = std::fs::read_to_string(&cfg) {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-            if let Some(d) = v["data_dir"].as_str() {
-                return PathBuf::from(d);
-            }
-        }
-    }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join("memlite-data")
+    // 分层解析：CLI > MEMLITE_DATA > 工作区记忆文件夹 > 用户级 config > 默认（config.rs）
+    config::resolve_data_dir(arg.as_deref())
 }
 
 fn emit(json: bool, value: serde_json::Value, human: &str) {
@@ -171,6 +172,16 @@ fn run(cli: Cli, dir: &PathBuf) -> i32 {
         }
 
         Cmd::Remember { content, title, tags, project } => {
+            // 写前敏感闸：明文口令/身份证/手机号/银行卡/token/私钥默认不入库
+            let probe = format!("{title}\n{content}");
+            let hits = sensitive::scan(&probe);
+            if !hits.is_empty() {
+                eprintln!(
+                    "拒绝入库：命中敏感信息（{}）。改存位置指针（如「密码在 ~/.env」）后重试。",
+                    hits.join("、")
+                );
+                return 3;
+            }
             let title = if title.trim().is_empty() {
                 search::default_title(&content)
             } else {
@@ -320,6 +331,16 @@ fn run(cli: Cli, dir: &PathBuf) -> i32 {
         }
 
         Cmd::Update { id, title, content, tags } => {
+            let probe = format!(
+                "{}\n{}",
+                title.clone().unwrap_or_default(),
+                content.clone().unwrap_or_default()
+            );
+            let hits = sensitive::scan(&probe);
+            if !hits.is_empty() {
+                eprintln!("拒绝更新：命中敏感信息（{}）。", hits.join("、"));
+                return 3;
+            }
             let mut s = Store::open(dir);
             let target = s.resolve(&id).map(|r| r.clone());
             let Some(old) = target else {
@@ -482,5 +503,42 @@ fn run(cli: Cli, dir: &PathBuf) -> i32 {
                 }
             }
         }
+
+        Cmd::Config { action } => match action {
+            ConfigCmd::Show => {
+                let mut merged = config::embedding_merged();
+                // data_dir 展示解析结果（不泄路径层级语义给脚本猜）
+                merged["data_dir"] =
+                    serde_json::json!(dir.to_string_lossy());
+                // api_key 脱敏
+                if let Some(k) = merged["api_key"].as_str() {
+                    if !k.is_empty() {
+                        merged["api_key"] = serde_json::json!("***");
+                    }
+                }
+                let proj = config::find_project_dir();
+                let v = serde_json::json!({
+                    "merged": merged,
+                    "project_dir": proj.map(|p| p.to_string_lossy().into_owned()),
+                    "user_config": config::user_config_path().to_string_lossy(),
+                });
+                emit(json, v.clone(), &serde_json::to_string_pretty(&v).unwrap());
+                0
+            }
+            ConfigCmd::Set { key, value, project } => match config::config_set(&key, &value, project) {
+                Ok(path) => {
+                    emit(
+                        json,
+                        serde_json::json!({"key": key, "path": path.to_string_lossy(), "scope": if project {"project"} else {"user"}}),
+                        &format!("已写入 {}（{}级）", path.display(), if project { "项目" } else { "用户" }),
+                    );
+                    0
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    1
+                }
+            },
+        },
     }
 }
