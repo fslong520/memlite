@@ -13,7 +13,7 @@ use store::Store;
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "memlite", about = "简化嵌入式记忆系统")]
+#[command(name = "memlite", about = "简化嵌入式记忆系统", version)]
 struct Cli {
     /// 数据目录（默认取配置）
     #[arg(long, global = true)]
@@ -59,6 +59,16 @@ enum Cmd {
     },
     /// 删记忆
     Forget { id: String },
+    /// 就地改一条（同 id 追加新版本，末写胜出；id/标签/项目保留除非显式给）
+    Update {
+        id: String,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        content: Option<String>,
+        #[arg(long)]
+        tags: Option<String>,
+    },
     /// git 同步
     Sync {
         #[arg(long)]
@@ -306,6 +316,44 @@ fn run(cli: Cli, dir: &PathBuf) -> i32 {
                 return 1;
             }
             emit(json, serde_json::json!({"deleted": rid}), &format!("已删 {rid}"));
+            0
+        }
+
+        Cmd::Update { id, title, content, tags } => {
+            let mut s = Store::open(dir);
+            let target = s.resolve(&id).map(|r| r.clone());
+            let Some(old) = target else {
+                eprintln!("记忆不存在: {id}");
+                return 1;
+            };
+            let new_title = title.unwrap_or_else(|| old.title.clone());
+            let new_content = content.unwrap_or_else(|| old.content.clone());
+            let new_tags: Vec<String> = match tags {
+                Some(csv) => csv.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect(),
+                None => old.tags.clone(),
+            };
+            if new_content.trim().is_empty() {
+                eprintln!("content 不能为空");
+                return 1;
+            }
+            // 同 id 追加新 put——追加日志末写胜出，id/父链语义不变
+            if let Err(e) = s.put_with_id(&old.id, &new_content, &new_title, &new_tags, &old.project) {
+                eprintln!("{e}");
+                return 1;
+            }
+            // 侧车向量跟着更新（有 API 才算；失败不拦）
+            let mut embedded = false;
+            if let Some(cfg) = embed::embedding_config() {
+                if let Ok(v) = embed::embed(&cfg, &format!("{new_title}\n{new_content}")) {
+                    let mut vidx = vectors::VectorIndex::open(dir);
+                    embedded = vidx.put(&old.id, &v).is_ok();
+                }
+            }
+            emit(
+                json,
+                serde_json::json!({"id": old.id, "title": new_title, "embedded": embedded}),
+                &format!("已更新 {}", old.id),
+            );
             0
         }
 

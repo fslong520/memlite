@@ -186,6 +186,33 @@ impl Store {
         Ok(())
     }
 
+    /// 就地改：同 id 追加新 put（末写胜出，id 不变）
+    pub fn put_with_id(
+        &mut self,
+        rid: &str,
+        content: &str,
+        title: &str,
+        tags: &[String],
+        project: &str,
+    ) -> Result<(), String> {
+        if content.trim().is_empty() {
+            return Err("content 为空".into());
+        }
+        let rec = Record {
+            op: "put".into(),
+            id: rid.to_string(),
+            ts: now_ts(),
+            title: title.trim().into(),
+            content: content.trim().into(),
+            tags: tags.iter().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect(),
+            project: project.trim().into(),
+            extra: HashMap::new(),
+        };
+        self.append(&rec).map_err(|e| e.to_string())?;
+        self.apply(rec);
+        Ok(())
+    }
+
     pub fn count(&self) -> usize {
         self.records.len()
     }
