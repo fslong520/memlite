@@ -26,11 +26,21 @@
 
 环境变量 `MEMLITE_API_BASE` / `MEMLITE_API_KEY` / `MEMLITE_EMBED_MODEL` 覆盖之。endpoint 兼容 OpenAI `/embeddings` 契约（硅基流动、DeepSeek、OpenAI、自建 vLLM/Ollama 皆可）。
 
+## 内置 Web 客户端
+
+```bash
+memlite web --port 7879    # 打开 http://127.0.0.1:7879/
+```
+
+单页管理界面：语义搜索（两档自动回退）、详情/删除、新增（带敏感闸）、一键 git 同步。零框架手写 HTTP，**只监听 127.0.0.1**（明文库不对外），写接口做同源 Origin 校验防 CSRF。
+
 ## 项目级记忆（工作区优先）
 
 工作区里有含 `config.json` 的 `.memlite/` 或 `memlite-data/` 文件夹（从 cwd 向上找，不越过 git 根）→ 该项目的记忆读写全部落它，不落用户级库；找不到才回用户级。项目级 data_dir 随工作区 git 一起 `memlite sync`（提交进外层仓）。
 
 ## 分层配置
+
+用户级 `data_dir` 可改：`memlite config set data_dir <新路径>`（写 `~/.memlite/config.json`，立即生效）。
 
 `~/.memlite/config.json`（用户级/全局）与项目级文件夹内 `config.json` 合并，项目级覆盖用户级，env 最后覆盖。向量 API 默认写用户级：
 

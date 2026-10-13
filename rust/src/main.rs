@@ -9,6 +9,7 @@ mod sensitive;
 mod store;
 mod sync;
 mod vectors;
+mod web;
 
 use clap::{Parser, Subcommand};
 use store::Store;
@@ -95,6 +96,11 @@ enum Cmd {
     Status,
     /// 压实（只留存活重写回单文件）
     Compact,
+    /// 内置 Web 管理界面（本地回环）
+    Web {
+        #[arg(long, default_value_t = 7879)]
+        port: u16,
+    },
     /// 查看/写配置（分层：项目级 > 用户级；set 缺省写用户级，--project 写项目级）
     Config {
         #[command(subcommand)]
@@ -130,8 +136,8 @@ fn emit(json: bool, value: serde_json::Value, human: &str) {
 }
 
 /// 单库检索：语义档优先（API 在配且通），失败或空回词面 BM25。
-/// 返回 (backend, hits)。两档回退的上层逻辑见 recall 命令。
-fn recall_search(
+/// 返回 (backend, hits)。两档回退的上层逻辑见 recall 命令（web 同复用）。
+pub(crate) fn recall_search(
     dir: &Path,
     query: &str,
     limit: usize,
@@ -533,6 +539,17 @@ fn run(cli: Cli, dir: &PathBuf) -> i32 {
                 }
                 Err(e) => {
                     eprintln!("压实失败: {e}");
+                    1
+                }
+            }
+        }
+
+        Cmd::Web { port } => {
+            eprintln!("web 界面仅监听 127.0.0.1（明文库不对外）；Ctrl-C 退出");
+            match web::serve(dir.clone(), port) {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("{e}");
                     1
                 }
             }
