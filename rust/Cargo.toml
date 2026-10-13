@@ -1,0 +1,17 @@
+[package]
+name = "memlite"
+version = "0.1.0"
+edition = "2021"
+description = "简化嵌入式记忆系统——JSONL 分块存储、BM25+语义双档检索、GitHub 同步、rules 注入"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2", features = ["json"] }
+uuid = { version = "1", features = ["v4"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
