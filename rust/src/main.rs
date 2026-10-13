@@ -12,7 +12,7 @@ mod vectors;
 
 use clap::{Parser, Subcommand};
 use store::Store;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(name = "memlite", about = "简化嵌入式记忆系统", version)]
@@ -129,6 +129,42 @@ fn emit(json: bool, value: serde_json::Value, human: &str) {
     }
 }
 
+/// 单库检索：语义档优先（API 在配且通），失败或空回词面 BM25。
+/// 返回 (backend, hits)。两档回退的上层逻辑见 recall 命令。
+fn recall_search(
+    dir: &Path,
+    query: &str,
+    limit: usize,
+    project: &str,
+    bm25_only: bool,
+) -> (&'static str, Vec<(f64, store::Record)>) {
+    let s = Store::open(dir);
+    let recs = s.all();
+    let mut backend: &'static str = "bm25";
+    let mut hits: Vec<(f64, store::Record)> = vec![];
+    if !bm25_only {
+        if let Some(cfg) = embed::embedding_config() {
+            if let Ok(qv) = embed::embed(&cfg, query) {
+                let mut vidx = vectors::VectorIndex::open(dir);
+                let mut getter = |id: &str| vidx.get(id);
+                hits = search::semantic(&recs, &qv, limit, project, &mut getter)
+                    .into_iter()
+                    .map(|(sc, r)| (sc, r.clone()))
+                    .collect();
+                backend = "semantic";
+            }
+        }
+    }
+    if backend != "semantic" || hits.is_empty() {
+        backend = "bm25";
+        hits = search::bm25(&recs, query, limit, project)
+            .into_iter()
+            .map(|(sc, r)| (sc, r.clone()))
+            .collect();
+    }
+    (backend, hits)
+}
+
 fn main() {
     let cli = Cli::parse();
     let dir = data_dir(&cli.data_dir);
@@ -221,26 +257,17 @@ fn run(cli: Cli, dir: &PathBuf) -> i32 {
         }
 
         Cmd::Recall { query, limit, project, bm25 } => {
-            let s = Store::open(dir);
-            let recs = s.all();
-            let mut backend = "bm25";
-            let mut hits: Vec<(f64, &store::Record)> = vec![];
-            if !bm25 {
-                if let Some(cfg) = embed::embedding_config() {
-                    match embed::embed(&cfg, &query) {
-                        Ok(qv) => {
-                            let mut vidx = vectors::VectorIndex::open(dir);
-                            let mut getter = |id: &str| vidx.get(id);
-                            hits = search::semantic(&recs, &qv, limit, &project, &mut getter);
-                            backend = "semantic";
-                        }
-                        Err(_) => hits = vec![], // 静默回退词面
-                    }
+            // 两档查序：解析库非用户级（项目级/--data-dir）且没搜到 → 自动回退用户级
+            let (mut backend, mut hits) = recall_search(&dir, &query, limit, &project, bm25);
+            let user_dir = config::user_data_dir();
+            let mut fallbacked = false;
+            if hits.is_empty() && *dir != user_dir {
+                let (b2, h2) = recall_search(&user_dir, &query, limit, &project, bm25);
+                if !h2.is_empty() {
+                    backend = b2;
+                    hits = h2;
+                    fallbacked = true;
                 }
-            }
-            if backend != "semantic" || hits.is_empty() {
-                backend = "bm25";
-                hits = search::bm25(&recs, &query, limit, &project);
             }
             if json {
                 let arr: Vec<serde_json::Value> = hits
@@ -255,10 +282,17 @@ fn run(cli: Cli, dir: &PathBuf) -> i32 {
                     .collect();
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({"backend": backend, "hits": arr})).unwrap()
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "backend": backend,
+                        "fallback": if fallbacked {"user"} else {""},
+                        "hits": arr
+                    })).unwrap()
                 );
             } else {
-                eprintln!("（{backend} 检索）");
+                eprintln!(
+                    "（{backend} 检索{}）",
+                    if fallbacked { "，项目级无命中已回退用户级" } else { "" }
+                );
                 if hits.is_empty() {
                     println!("（无命中）");
                 }

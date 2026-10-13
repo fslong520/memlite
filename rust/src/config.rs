@@ -57,6 +57,18 @@ pub fn project_config() -> (Option<PathBuf>, Value) {
     }
 }
 
+/// 用户级 data_dir（不受项目级影响——两档回退的兜底目标）
+pub fn user_data_dir() -> PathBuf {
+    let user = load(&user_config_path());
+    if let Some(d) = user["data_dir"].as_str() {
+        if !d.is_empty() {
+            return PathBuf::from(d);
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    PathBuf::from(home).join("memlite-data")
+}
+
 /// data_dir 解析（四层）
 pub fn resolve_data_dir(cli: Option<&Path>) -> PathBuf {
     if let Some(d) = cli {
@@ -70,14 +82,7 @@ pub fn resolve_data_dir(cli: Option<&Path>) -> PathBuf {
     if let Some(proj) = find_project_dir() {
         return proj;
     }
-    let user = load(&user_config_path());
-    if let Some(d) = user["data_dir"].as_str() {
-        if !d.is_empty() {
-            return PathBuf::from(d);
-        }
-    }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join("memlite-data")
+    user_data_dir()
 }
 
 /// embedding 合并：用户级为底、项目级覆盖、env 最后覆盖（操作者意图最优先）
