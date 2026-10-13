@@ -106,15 +106,20 @@ def semantic_search(
     query_emb: list[float],
     limit: int = 10,
     project: str = "",
+    vec_getter=None,
 ) -> list[tuple[float, dict]]:
-    """余弦语义检索：只排有 emb 的记录，无向量的记录留给 BM25 兜底。"""
+    """余弦语义检索。vec_getter(rid)->向量：给则用之（向量已拆侧车），
+    否则回退读记录内 emb 字段（兼容拆分前旧数据）。"""
     if not query_emb:
         return []
-    pool = [
-        r for r in records
-        if r.get("emb") and (not project or r.get("project") == project)
-    ]
-    scored = [(cosine(query_emb, r["emb"]), r) for r in pool]
-    scored = [(s, r) for s, r in scored if s > 0]
+    pool = [r for r in records if not project or r.get("project") == project]
+    scored = []
+    for r in pool:
+        v = vec_getter(r["id"]) if vec_getter else r.get("emb")
+        if not v:
+            continue
+        s = cosine(query_emb, v)
+        if s > 0:
+            scored.append((s, r))
     scored.sort(key=lambda x: (-x[0], -x[1].get("ts", 0)))
     return scored[:limit]

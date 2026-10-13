@@ -378,8 +378,11 @@ class EmbedTest(unittest.TestCase):
         os.environ["MEMLITE_CONFIG"] = os.path.join(self.dir, "nonexistent.json")
         from memlite.cli import main
         main(["--data-dir", data, "remember", "nginx 504 调 timeout"])
-        rec = Store(data).all()[0]
-        self.assertEqual(rec["emb"][0], 1.0)
+        from memlite.vectors import VectorIndex
+        vidx = VectorIndex(data)
+        self.assertEqual(vidx.count(), 1)
+        self.assertEqual(vidx.get(Store(data).all()[0]["id"])[0], 1.0)
+        self.assertNotIn("emb", Store(data).all()[0])  # 正文仓不含向量
 
     def test_recall_falls_back_on_api_error(self):
         import memlite.embed as embedm
@@ -411,8 +414,12 @@ class EmbedTest(unittest.TestCase):
 
         data = os.path.join(self.dir, "data")
         s = Store(data)
-        s.put("容器编排 Pod 卡在 Pending", title="K8s Pod Pending", emb=[0.0, 1.0])
-        s.put("菜谱", title="", emb=[1.0, 0.0])
+        from memlite.vectors import VectorIndex
+        vidx = VectorIndex(data)
+        rid1 = s.put("容器编排 Pod 卡在 Pending", title="K8s Pod Pending")
+        vidx.put(rid1, [0.0, 1.0])
+        rid2 = s.put("菜谱", title="")
+        vidx.put(rid2, [1.0, 0.0])
         embedm.get_client = lambda: self._fake_client({"容器": 1})
         os.environ["MEMLITE_CONFIG"] = os.path.join(self.dir, "nonexistent.json")
         from memlite.cli import main
@@ -427,7 +434,9 @@ class EmbedTest(unittest.TestCase):
 
         data = os.path.join(self.dir, "data")
         s = Store(data)
-        s.put("rust 编译缓存", title="rust 编译", emb=[1.0, 0.0])
+        from memlite.vectors import VectorIndex
+        rid = s.put("rust 编译缓存", title="rust 编译")
+        VectorIndex(data).put(rid, [1.0, 0.0])
         from memlite.cli import main
         import io, contextlib
         buf = io.StringIO()
@@ -446,8 +455,8 @@ class EmbedTest(unittest.TestCase):
         os.environ["MEMLITE_CONFIG"] = os.path.join(self.dir, "nonexistent.json")
         from memlite.cli import main
         main(["--data-dir", data, "reembed"])
-        s2 = Store(data)
-        self.assertEqual(s2.get(rid)["emb"][2], 1.0)
+        from memlite.vectors import VectorIndex
+        self.assertEqual(VectorIndex(data).get(rid)[2], 1.0)
 
     def test_reembed_requires_config(self):
         from memlite.store import Store
@@ -482,3 +491,67 @@ class EmbedTest(unittest.TestCase):
         from memlite.search import cosine
         self.assertEqual(cosine([1.0], [1.0, 2.0]), 0.0)
         self.assertEqual(cosine([], [1.0]), 0.0)
+
+
+class ShardTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="memlite-shard-")
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_rotation_and_reload(self):
+        # 小 chunk 强制轮转
+        from memlite.store import Store
+        s = Store(self.dir, chunk_bytes=500)
+        for i in range(20):
+            s.put(f"记忆内容第 {i} 条，" + "充长度" * 10, title=f"t{i}")
+        files = [f["file"] for f in s.files()]
+        self.assertGreater(len(files), 1)  # 发生了轮转
+        self.assertEqual(files[-1], "memory.jsonl")  # 活跃文件在最后
+        s2 = Store(self.dir, chunk_bytes=500)
+        self.assertEqual(s2.count(), 20)
+
+    def test_tombstone_in_new_chunk_overrides_old(self):
+        from memlite.store import Store
+        s = Store(self.dir, chunk_bytes=400)
+        rid = s.put("第一条老记忆", title="old")
+        for i in range(10):
+            s.put(f"填充记忆 {i} " + "字" * 30, title=f"f{i}")
+        s.delete(rid)  # 墓碑写进新分块
+        s2 = Store(self.dir, chunk_bytes=400)
+        self.assertIsNone(s2.get(rid))
+        self.assertNotIn(rid, s2.records)
+
+    def test_compact_collapses_chunks(self):
+        from memlite.store import Store
+        s = Store(self.dir, chunk_bytes=400)
+        keep = s.put("存活条", title="k")
+        for i in range(10):
+            s.put(f"填充 {i} " + "字" * 30, title=f"f{i}")
+        s.delete(list(s.records.keys() - {keep})[0])
+        s.compact()
+        files = [f["file"] for f in s.files()]
+        self.assertEqual(files, ["memory.jsonl"])
+        s2 = Store(self.dir, chunk_bytes=400)
+        self.assertEqual(s2.count(), len(s2.records))
+
+    def test_vector_sidecar_dim_adaptive(self):
+        from memlite.vectors import VectorIndex
+        v = VectorIndex(self.dir)
+        v.put("a", [1.0, 2.0, 3.0])
+        v.put("b", [4.0, 5.0, 6.0])
+        v2 = VectorIndex(self.dir)  # 重新加载从文件推 dim
+        self.assertEqual(v2.dim, 3)
+        self.assertEqual(v2.get("a"), [1.0, 2.0, 3.0])
+        with self.assertRaises(ValueError):
+            v2.put("c", [1.0])  # 维度不一致拒收
+
+    def test_vector_overwrite_in_place(self):
+        from memlite.vectors import VectorIndex
+        v = VectorIndex(self.dir)
+        v.put("a", [1.0, 0.0])
+        v.put("a", [0.0, 1.0])
+        v2 = VectorIndex(self.dir)
+        self.assertEqual(v2.count(), 1)
+        self.assertEqual(v2.get("a"), [0.0, 1.0])

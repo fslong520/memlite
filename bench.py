@@ -66,15 +66,19 @@ def main():
         embed = _fake_embed if fake else (lambda t: client.embed(t))
 
         s = Store(d)
+        from memlite.vectors import VectorIndex
+        vidx = VectorIndex(d)
         ids = []
         for title, content, _ in CORPUS:
-            emb = embed(f"{title}\n{content}") if use_semantic else None
-            ids.append(s.put(content, title=title, tags=[], emb=emb))
+            rid = s.put(content, title=title, tags=[])
+            if use_semantic:
+                vidx.put(rid, embed(f"{title}\n{content}"))
+            ids.append(rid)
         hits1 = hits3 = 0
         misses = []
         for i, (title, content, query) in enumerate(CORPUS):
             if use_semantic:
-                got = semantic_search(s.all(), embed(query), limit=3)
+                got = semantic_search(s.all(), embed(query), limit=3, vec_getter=vidx.get)
             else:
                 got = search(s.all(), query, limit=3)
             top_ids = [r["id"] for _, r in got]

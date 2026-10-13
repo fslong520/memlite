@@ -91,16 +91,20 @@ def cmd_remember(args) -> int:
                 head = head.split(sep, 1)[0]
                 break
         title = head[:40]
-    # 配了嵌入 API 就顺手算向量；失败不拦存入（词面档仍可检索）
-    emb, emb_note = None, ""
+    # 配了嵌入 API 就顺手算向量进侧车；失败不拦存入（词面档仍可检索）
     from . import embed as embedm
+    from .vectors import VectorIndex
 
-    if embedm.get_client():
+    emb, emb_note = None, ""
+    client = embedm.get_client()
+    if client:
         try:
-            emb = embedm.get_client().embed(f"{title}\n{args.content}")
+            emb = client.embed(f"{title}\n{args.content}")
         except embedm.EmbeddingError as e:
             emb_note = f"（嵌入失败，仅词面可查：{e}）"
-    rid = store.put(args.content, title=title, tags=tags, project=args.project or "", emb=emb)
+    rid = store.put(args.content, title=title, tags=tags, project=args.project or "")
+    if emb is not None:
+        VectorIndex(_data_dir(args)).put(rid, emb)
     _out({"id": rid, "title": title, "embedded": emb is not None, "records": store.count()},
          args.json, f"已存 {rid}「{title}」{emb_note}（共 {store.count()} 条）")
     return 0
@@ -109,6 +113,7 @@ def cmd_remember(args) -> int:
 def cmd_recall(args) -> int:
     from .search import search, semantic_search
     from . import embed as embedm
+    from .vectors import VectorIndex
 
     store = _load_store(_data_dir(args))
     backend = "bm25"
@@ -118,8 +123,9 @@ def cmd_recall(args) -> int:
     if client and not args.bm25:
         try:
             qemb = client.embed(args.query)
+            vidx = VectorIndex(_data_dir(args))
             hits = semantic_search(store.all(), qemb, limit=args.limit,
-                                   project=args.project or "")
+                                   project=args.project or "", vec_getter=vidx.get)
             backend = "semantic"
         except embedm.EmbeddingError:
             hits = []
@@ -220,8 +226,9 @@ def cmd_inject(args) -> int:
 
 
 def cmd_reembed(args) -> int:
-    """回填向量：给还没有 emb 的记忆补算（配了 API 才有意义）。"""
+    """回填向量：给侧车还没有向量的记忆补算（配了 API 才有意义）。"""
     from . import embed as embedm
+    from .vectors import VectorIndex
 
     store = _load_store(_data_dir(args))
     client = embedm.get_client()
@@ -229,24 +236,27 @@ def cmd_reembed(args) -> int:
         print("未配置嵌入 API（config 的 embedding 段或 MEMLITE_API_BASE/KEY/MODEL）",
               file=sys.stderr)
         return 2
+    vidx = VectorIndex(_data_dir(args))
     done = failed = 0
     for rec in store.all():
-        if rec.get("emb"):
+        if vidx.has(rec["id"]):
             continue
         try:
-            store.update_emb(rec["id"], client.embed(f"{rec.get('title','')}\n{rec['content']}"))
+            vidx.put(rec["id"], client.embed(f"{rec.get('title','')}\n{rec['content']}"))
             done += 1
         except embedm.EmbeddingError as e:
             print(f"跳过 {rec['id']}: {e}", file=sys.stderr)
             failed += 1
-    out = {"embedded": done, "failed": failed, "total": store.count()}
-    _out(out, args.json, f"回填 {done} 条，失败 {failed}，库容 {store.count()}")
+    out = {"embedded": done, "failed": failed, "vectors": vidx.count(), "total": store.count()}
+    _out(out, args.json,
+         f"回填 {done} 条，失败 {failed}，侧车向量 {vidx.count()}，库容 {store.count()}")
     return 0 if failed == 0 else 1
 
 
 def cmd_status(args) -> int:
     from . import sync as syncmod
     from . import embed as embedm
+    from .vectors import VectorIndex
 
     data_dir = _data_dir(args)
     store = _load_store(data_dir)
@@ -256,7 +266,8 @@ def cmd_status(args) -> int:
         "records": store.count(),
         "lines": store.line_count(),
         "bad_lines": store.bad_lines,
-        "embedded": sum(1 for r in store.all() if r.get("emb")),
+        "files": store.files(),
+        "vectors": VectorIndex(data_dir).count(),
         "embedding": {
             "configured": bool(ecfg.get("api_base") and ecfg.get("api_key") and ecfg.get("model")),
             "api_base": ecfg.get("api_base", ""),

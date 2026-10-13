@@ -14,8 +14,10 @@ import os
 import subprocess
 import time
 
-# 同步白名单：只有这些文件进 git（明文记忆 + 元数据）
-TRACKED_FILES = ("memory.jsonl", "meta.json", "README.md")
+# 同步白名单（git pathspec glob）：正文分块 memory*.jsonl + 元数据 + README。
+# 向量侧车 emb.f32/emb-ids.txt 是派生数据，不进 git（.gitignore 兜底），
+# 他机 clone 后 memlite reembed 重建。
+TRACKED_PATTERNS = ("memory*.jsonl", "meta.json", "README.md")
 
 
 class SyncError(RuntimeError):
@@ -37,7 +39,8 @@ def _git(repo: str, *args: str, check: bool = True) -> str:
 def status(repo: str) -> dict:
     """同步状态摘要。"""
     has_remote = bool(_git(repo, "remote", "get-url", "origin", check=False))
-    dirty = _git(repo, "status", "--porcelain", "--", *TRACKED_FILES, check=False)
+    tracked = _whitelisted(repo)
+    dirty = _git(repo, "status", "--porcelain", "--", *tracked, check=False) if tracked else ""
     head = subprocess.run(
         ["git", "-C", repo, "rev-parse", "HEAD"], capture_output=True, text=True
     )
@@ -54,6 +57,16 @@ def status(repo: str) -> dict:
     }
 
 
+def _whitelisted(repo: str) -> list[str]:
+    """展开白名单 glob，只留真实存在的文件（git pathspec 无匹配会报错）。"""
+    import glob as globmod
+
+    out: list[str] = []
+    for pat in TRACKED_PATTERNS:
+        out.extend(os.path.basename(p) for p in sorted(globmod.glob(os.path.join(repo, pat))))
+    return out
+
+
 def sync(repo: str, message: str = "") -> dict:
     """一次完整同步：add(白名单) → commit → pull --rebase → push → 双通道核验。"""
     if not os.path.isdir(os.path.join(repo, ".git")):
@@ -63,8 +76,8 @@ def sync(repo: str, message: str = "") -> dict:
 
     out: dict = {"repo": repo}
 
-    # 1. 只 add 白名单文件（存在的才 add）
-    added = [f for f in TRACKED_FILES if os.path.isfile(os.path.join(repo, f))]
+    # 1. 只 add 白名单文件（glob 展开分块命名；凭据类永不匹配；新增归档自动涵盖）
+    added = _whitelisted(repo)
     if added:
         _git(repo, "add", "--", *added)
     out["added"] = added
