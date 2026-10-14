@@ -92,10 +92,20 @@ jobs:
           mv memlite-x86_64-pc-windows-msvc.exe "memlite-${GITHUB_REF_NAME}-x86_64-pc-windows-msvc.exe"
           mv memlite-aarch64-apple-darwin "memlite-${GITHUB_REF_NAME}-aarch64-apple-darwin"
           cp ../docs/memlite-rules.md .
-          sha256sum memlite-* memlite-rules.md > SHA256SUMS
+          sha256sum "memlite-${GITHUB_REF_NAME}-"* memlite-rules.md > SHA256SUMS
           if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
               --title "$GITHUB_REF_NAME" --generate-notes
           fi
-          gh release upload "$GITHUB_REF_NAME" memlite-* memlite-rules.md SHA256SUMS \
-            --repo "$GITHUB_REPOSITORY" --clobber
+          # 刚 create 的 release 资产端点最终一致，首传可能瞬时 404（实测 v0.1.2）——逐文件重试
+          sleep 5
+          for f in "memlite-${GITHUB_REF_NAME}-"* memlite-rules.md SHA256SUMS; do
+            for i in 1 2 3 4 5; do
+              if gh release upload "$GITHUB_REF_NAME" "$f" \
+                  --repo "$GITHUB_REPOSITORY" --clobber; then
+                break
+              fi
+              if [ "$i" = 5 ]; then echo "上传失败: $f"; exit 1; fi
+              sleep 5
+            done
+          done
