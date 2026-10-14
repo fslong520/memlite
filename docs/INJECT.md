@@ -106,10 +106,33 @@ memlite inject --emit     # rules 档生成独立文件＋拷贝引导表
 | kylinbot | `~/.kylinbot/workspace/AGENTS.md` | |
 | generic | `~/AGENTS.md` | 兜底：多数 harness 认工作目录或家目录 AGENTS.md |
 
+## 手动注入与自定义
+
+注入文件都是**普通文本**，三条手动路径，随你粘贴、随你改：
+
+1. **出块文本手动粘**：`memlite inject --print` 把块嵌正文（`<!-- memlite:begin -->` 外壳＋
+   注入源全文）打到 stdout，不写任何文件——粘进任意文件都行（不限目标矩阵：团队 wiki、
+   他方工具的自定义指令文件皆可）。
+2. **出独立文件手动放**：`memlite inject --emit [FILE]` 生成通用 rules 文件（无块标记），
+   按打印出的拷贝表 `cp` / `cat >>` 各目标。
+3. **纯手抄**：就用上面的最小模板，自己贴进目标文件。
+
+**修改规则（重要）**：
+
+- 块**外**的原有内容永远安全——注入是追加/替换块模型，动不到你文件的其他部分。
+- 块**内**以注入源为准：重跑 `--target`/`--all` 会按 `~/.qoder/rules/AGENTS.md`
+  **逐字刷新块内**，手改会被覆盖。想让自定义留住：
+  - 首选**改注入源**——一处改，重跑注入全量刷新；
+  - 或注入后**手动维护**，不再对这些目标跑 inject（要收回改用 `--remove <名>` 再手动）。
+- `--probe` 只看块标记数量（一次 BEGIN/END），检不出块内手改——对账用
+  `memlite inject --print | diff - <目标文件>` 或 git。
+- `--force` 只解「目标已有他家记忆系统」的冲突拒注，不改变上述刷新语义。
+
 ## 命令一览
 
 ```bash
 memlite inject --probe              # 探测各目标现状（不写任何文件）
+memlite inject --print              # 只打印块文本到 stdout（手动粘贴/自定义用，不写文件）
 memlite inject --target <名>        # 单目标块嵌（幂等）
 memlite inject --all                # memory+agents 档全部自动目标
 memlite inject --emit [FILE]        # 生成独立 rules 文件＋逐产品拷贝表

@@ -87,6 +87,9 @@ enum Cmd {
         all: bool,
         #[arg(long)]
         probe: bool,
+        /// 打印块嵌正文（BEGIN/END 外壳＋注入源全文）到 stdout，不写任何文件——手动粘到任意文件用
+        #[arg(long)]
+        print: bool,
         #[arg(long)]
         remove: Option<String>,
         #[arg(long)]
@@ -461,7 +464,7 @@ fn run(cli: Cli, dir: &PathBuf) -> i32 {
             }
         }
 
-        Cmd::Inject { target, all, probe: probe_only, remove, force, emit } => {
+        Cmd::Inject { target, all, probe: probe_only, print: print_block, remove, force, emit } => {
             if let Some(out_file) = emit {
                 // emit 只生成文件+引导，不改任何他方文件（格式各异，用户按表拷贝）
                 if let Err(e) = std::fs::write(&out_file, inject::standalone_text()) {
@@ -470,6 +473,19 @@ fn run(cli: Cli, dir: &PathBuf) -> i32 {
                 }
                 print!("{}", inject::emit_guidance(&out_file));
                 return 0;
+            }
+            if print_block {
+                // 手动注入：只出文本不落盘，用户可粘进任意文件并自行修改
+                return match inject::rules_text(false) {
+                    Ok(b) => {
+                        print!("{b}");
+                        0
+                    }
+                    Err(e) => {
+                        eprintln!("{e}");
+                        1
+                    }
+                };
             }
             if probe_only {
                 let v = inject::probe();
@@ -486,7 +502,7 @@ fn run(cli: Cli, dir: &PathBuf) -> i32 {
             } else if let Some(t) = target {
                 vec![inject::inject(&t, force, false)]
             } else {
-                eprintln!("须指定 --emit [文件] 或 --target <名> 或 --all 或 --probe 或 --remove <名>");
+                eprintln!("须指定 --emit [文件] 或 --target <名> 或 --all 或 --probe 或 --print 或 --remove <名>");
                 return 2;
             };
             println!("{}", serde_json::to_string_pretty(&serde_json::json!(results)).unwrap());

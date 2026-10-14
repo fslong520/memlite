@@ -94,6 +94,7 @@ memlite update <id> --title "新标题" --content "改后正文"   # 就地改�
 memlite sync                          # git 同步（白名单 add + sha 双通道核验）
 memlite status
 memlite inject --probe                # 看各软件 rules 注入点现状
+memlite inject --print                # 只打印块文本（手动粘进任意文件），不写盘
 memlite inject --all                  # 注入（正文取 Qoder rules 全文；冲突自动跳过，--force 强注）
 memlite bench [--semantic]            # 检索命中率评测（临时库，报 hit@1/hit@3）
 ```
@@ -128,6 +129,9 @@ memlite-data/
 （`--force` 强注），重复注入幂等。没有 Qoder 规则文件的用户，先按
 [docs/INJECT.md](docs/INJECT.md) 的最小模板落一份再注入；Qoder 自身不注块——
 该文件就是注入源，再嵌即双 always_on。
+
+**手动注入与修改**：`memlite inject --print` 出块文本随你粘进任意文件；
+块外内容永远安全，块内以注入源为准（重跑按源刷新，想留住自定义就改注入源或改后不再重跑）——细则见 [docs/INJECT.md](docs/INJECT.md)。
 
 ## 协议
 
