@@ -77,7 +77,7 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
-    /// rules 注入
+    /// rules 注入（三档：rules 整文件 / memory 块嵌 / agents 块嵌）
     Inject {
         #[arg(long)]
         target: Option<String>,
@@ -89,6 +89,9 @@ enum Cmd {
         remove: Option<String>,
         #[arg(long)]
         force: bool,
+        /// 生成独立系统级 rules 文件并打印逐产品拷贝引导（可带输出路径，缺省 memlite-rules.md）
+        #[arg(long, num_args = 0..=1, default_missing_value = "memlite-rules.md", value_name = "FILE")]
+        emit: Option<String>,
     },
     /// 给无向量的记忆回填嵌入（须配 API）
     Reembed,
@@ -440,7 +443,16 @@ fn run(cli: Cli, dir: &PathBuf) -> i32 {
             }
         }
 
-        Cmd::Inject { target, all, probe: probe_only, remove, force } => {
+        Cmd::Inject { target, all, probe: probe_only, remove, force, emit } => {
+            if let Some(out_file) = emit {
+                // emit 只生成文件+引导，不改任何他方文件（格式各异，用户按表拷贝）
+                if let Err(e) = std::fs::write(&out_file, inject::standalone_text()) {
+                    eprintln!("写 {out_file} 失败: {e}");
+                    return 1;
+                }
+                print!("{}", inject::emit_guidance(&out_file));
+                return 0;
+            }
             if probe_only {
                 let v = inject::probe();
                 println!("{}", serde_json::to_string_pretty(&serde_json::json!(v)).unwrap());
@@ -453,11 +465,11 @@ fn run(cli: Cli, dir: &PathBuf) -> i32 {
             }
             let dir_s = dir.to_string_lossy().into_owned();
             let results: Vec<serde_json::Value> = if all {
-                inject::TARGETS.iter().map(|(t, _)| inject::inject(t, &dir_s, force, false)).collect()
+                inject::TARGETS.iter().filter(|t| t.auto).map(|t| inject::inject(t.name, &dir_s, force, false)).collect()
             } else if let Some(t) = target {
                 vec![inject::inject(&t, &dir_s, force, false)]
             } else {
-                eprintln!("须指定 --target <名> 或 --all 或 --probe 或 --remove <名>");
+                eprintln!("须指定 --emit [文件] 或 --target <名> 或 --all 或 --probe 或 --remove <名>");
                 return 2;
             };
             println!("{}", serde_json::to_string_pretty(&serde_json::json!(results)).unwrap());
