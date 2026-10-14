@@ -240,6 +240,50 @@ impl Store {
         }
     }
 
+    /// 同 id 的全部历史版本（append-only 日志天然保历史）：
+    /// 按文件序（旧→新）扫 put 行，返回按时间排列的版本列表（含被 update 覆盖的旧版）。
+    pub fn versions(&self, rid: &str) -> Vec<Record> {
+        let mut out = Vec::new();
+        for path in self.files() {
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            for line in text.lines() {
+                let line = line.trim();
+                if line.is_empty() { continue }
+                if let Ok(rec) = serde_json::from_str::<Record>(line) {
+                    if rec.op == "put" && rec.id == rid {
+                        out.push(rec);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// 全库标签频次（降序）
+    pub fn tag_counts(&self) -> Vec<(String, usize)> {
+        let mut m: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for r in self.records.values() {
+            for t in &r.tags {
+                *m.entry(t.clone()).or_insert(0) += 1;
+            }
+        }
+        let mut v: Vec<(String, usize)> = m.into_iter().collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        v
+    }
+
+    /// 全库 project 频次（降序，空 project 归「（无）」）
+    pub fn project_counts(&self) -> Vec<(String, usize)> {
+        let mut m: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for r in self.records.values() {
+            let k = if r.project.is_empty() { "（无）".to_string() } else { r.project.clone() };
+            *m.entry(k).or_insert(0) += 1;
+        }
+        let mut v: Vec<(String, usize)> = m.into_iter().collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        v
+    }
+
     pub fn line_count(&self) -> u64 {
         self.files()
             .iter()

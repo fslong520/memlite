@@ -93,9 +93,27 @@ fn handle(mut stream: TcpStream, data_dir: &std::path::Path) -> Result<(), Strin
             let id = url_param(&path, "id").unwrap_or_default();
             api_show(data_dir, &id, &mut stream)
         }
+        ("GET", "/api/list") => {
+            let limit: usize = url_param(&path, "limit").and_then(|v| v.parse().ok()).unwrap_or(30);
+            let offset: usize = url_param(&path, "offset").and_then(|v| v.parse().ok()).unwrap_or(0);
+            api_list(data_dir, limit, offset, &mut stream)
+        }
+        ("GET", "/api/export") => api_export(data_dir, &mut stream),
+        ("GET", "/api/config") => api_config(&mut stream),
         ("POST", "/api/remember") => api_remember(data_dir, &body, &mut stream),
+        ("POST", "/api/update") => api_update(data_dir, &body, &mut stream),
         ("POST", "/api/forget") => api_forget(data_dir, &body, &mut stream),
         ("POST", "/api/sync") => api_sync(data_dir, &mut stream),
+        ("POST", "/api/compact") => api_compact(data_dir, &mut stream),
+        ("POST", "/api/reembed") => api_reembed(data_dir, &mut stream),
+        ("GET", "/api/versions") => {
+            let id = url_param(&path, "id").unwrap_or_default();
+            api_versions(data_dir, &id, &mut stream)
+        }
+        ("GET", "/api/tags") => api_tags(data_dir, &mut stream),
+        ("GET", "/api/projects") => api_projects(data_dir, &mut stream),
+        ("GET", "/api/inject") => api_inject_probe(&mut stream),
+        ("POST", "/api/inject") => api_inject_do(data_dir, &body, &mut stream),
         _ => resp(&mut stream, 404, r#"{"error":"not found"}"#),
     }
 }
@@ -211,6 +229,181 @@ fn api_show(data_dir: &std::path::Path, id: &str, stream: &mut TcpStream) -> Res
     }
 }
 
+/// 列最近（空查询时的默认视图，带分页）：按 ts 降序
+fn api_list(data_dir: &std::path::Path, limit: usize, offset: usize, stream: &mut TcpStream) -> Result<(), String> {
+    let s = Store::open(data_dir);
+    let mut recs = s.all();
+    recs.sort_by(|a, b| b.ts.partial_cmp(&a.ts).unwrap_or(std::cmp::Ordering::Equal));
+    let total = recs.len();
+    let items: Vec<serde_json::Value> = recs
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(|r| serde_json::to_value(r).unwrap())
+        .collect();
+    let v = serde_json::json!({"total": total, "offset": offset, "limit": limit, "items": items});
+    resp(stream, 200, &serde_json::to_string(&v).unwrap())
+}
+
+/// 编辑（同 id 追加新版本，末写胜出；敏感闸与 CLI 同尺）
+fn api_update(data_dir: &std::path::Path, body: &str, stream: &mut TcpStream) -> Result<(), String> {
+    let v: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(_) => return resp(stream, 400, r#"{"error":"body 不是 JSON"}"#),
+    };
+    let id = v["id"].as_str().unwrap_or("").trim().to_string();
+    if id.is_empty() {
+        return resp(stream, 400, r#"{"error":"缺 id"}"#);
+    }
+    let mut s = Store::open(data_dir);
+    let Some(old) = s.resolve(&id).map(|r| r.clone()) else {
+        return resp(stream, 404, r#"{"error":"记忆不存在"}"#);
+    };
+    let new_title = v["title"].as_str().map(|t| t.trim().to_string()).unwrap_or_else(|| old.title.clone());
+    let new_content = v["content"].as_str().map(|c| c.trim().to_string()).unwrap_or_else(|| old.content.clone());
+    let new_tags: Vec<String> = match v["tags"].as_array() {
+        Some(a) => a.iter().filter_map(|t| t.as_str()).map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect(),
+        None => old.tags.clone(),
+    };
+    if new_content.is_empty() {
+        return resp(stream, 400, r#"{"error":"content 不能为空"}"#);
+    }
+    let hits = sensitive::scan(&format!("{new_title}\n{new_content}"));
+    if !hits.is_empty() {
+        let e = serde_json::json!({"error": format!("命中敏感信息（{}）", hits.join("、"))});
+        return resp(stream, 400, &e.to_string());
+    }
+    if let Err(e) = s.put_with_id(&old.id, &new_content, &new_title, &new_tags, &old.project) {
+        return resp(stream, 400, &serde_json::json!({"error": e}).to_string());
+    }
+    let mut embedded = false;
+    if let Some(cfg) = crate::embed::embedding_config() {
+        if let Ok(vec) = crate::embed::embed(&cfg, &format!("{new_title}\n{new_content}")) {
+            embedded = crate::vectors::VectorIndex::open(data_dir).put(&old.id, &vec).is_ok();
+        }
+    }
+    let out = serde_json::json!({"id": old.id, "title": new_title, "embedded": embedded});
+    resp(stream, 200, &out.to_string())
+}
+
+/// 导出全库明文 JSON（管理用；含 tombstone 前的存活记录）
+fn api_export(data_dir: &std::path::Path, stream: &mut TcpStream) -> Result<(), String> {
+    let s = Store::open(data_dir);
+    let arr: Vec<serde_json::Value> = s.all().iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+    let body = serde_json::to_string(&arr).unwrap();
+    let head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nContent-Disposition: attachment; filename=\"memlite-export.json\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).map_err(|e| e.to_string())?;
+    stream.write_all(body.as_bytes()).map_err(|e| e.to_string())?;
+    stream.flush().map_err(|e| e.to_string())
+}
+
+/// 配置查看（api_key 脱敏）
+fn api_config(stream: &mut TcpStream) -> Result<(), String> {
+    let mut merged = crate::config::embedding_merged();
+    if let Some(k) = merged["api_key"].as_str() {
+        if !k.is_empty() {
+            merged["api_key"] = serde_json::json!("***");
+        }
+    }
+    let v = serde_json::json!({
+        "embedding": merged,
+        "user_config": crate::config::user_config_path().to_string_lossy(),
+        "project_dir": crate::config::find_project_dir().map(|p| p.to_string_lossy().into_owned()),
+    });
+    resp(stream, 200, &serde_json::to_string(&v).unwrap())
+}
+
+/// 压实：只留存活重写回单文件
+fn api_compact(data_dir: &std::path::Path, stream: &mut TcpStream) -> Result<(), String> {
+    let mut s = Store::open(data_dir);
+    match s.compact() {
+        Ok(before) => {
+            let v = serde_json::json!({"lines_before": before, "records": s.count()});
+            resp(stream, 200, &v.to_string())
+        }
+        Err(e) => resp(stream, 400, &serde_json::json!({"error": e.to_string()}).to_string()),
+    }
+}
+
+/// 回填缺失向量（须嵌入 API 在配；增量只算没有的）
+fn api_reembed(data_dir: &std::path::Path, stream: &mut TcpStream) -> Result<(), String> {
+    let Some(cfg) = crate::embed::embedding_config() else {
+        return resp(stream, 400, r#"{"error":"未配置嵌入 API"}"#);
+    };
+    let s = Store::open(data_dir);
+    let mut vidx = crate::vectors::VectorIndex::open(data_dir);
+    let (mut done, mut failed) = (0u32, 0u32);
+    for r in s.all() {
+        if vidx.has(&r.id) {
+            continue;
+        }
+        match crate::embed::embed(&cfg, &format!("{}\n{}", r.title, r.content)) {
+            Ok(v) => {
+                if vidx.put(&r.id, &v).is_ok() {
+                    done += 1;
+                }
+            }
+            Err(_) => failed += 1,
+        }
+    }
+    let out = serde_json::json!({"embedded": done, "failed": failed, "vectors": vidx.count(), "total": s.count()});
+    resp(stream, 200, &out.to_string())
+}
+
+/// 同 id 全部历史版本（append-only 日志天然保历史）
+fn api_versions(data_dir: &std::path::Path, id: &str, stream: &mut TcpStream) -> Result<(), String> {
+    let s = Store::open(data_dir);
+    let target = s.resolve(id).map(|r| r.id.clone());
+    let Some(rid) = target else {
+        return resp(stream, 404, r#"{"error":"记忆不存在"}"#);
+    };
+    let vs = s.versions(&rid);
+    let arr: Vec<serde_json::Value> = vs.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+    resp(stream, 200, &serde_json::json!({"id": rid, "versions": arr}).to_string())
+}
+
+/// 标签频次（top 100）
+fn api_tags(data_dir: &std::path::Path, stream: &mut TcpStream) -> Result<(), String> {
+    let s = Store::open(data_dir);
+    let arr: Vec<serde_json::Value> = s.tag_counts().into_iter().take(100)
+        .map(|(t, n)| serde_json::json!({"tag": t, "count": n})).collect();
+    resp(stream, 200, &serde_json::json!({"tags": arr}).to_string())
+}
+
+/// project 频次
+fn api_projects(data_dir: &std::path::Path, stream: &mut TcpStream) -> Result<(), String> {
+    let s = Store::open(data_dir);
+    let arr: Vec<serde_json::Value> = s.project_counts().into_iter()
+        .map(|(p, n)| serde_json::json!({"project": p, "count": n})).collect();
+    resp(stream, 200, &serde_json::json!({"projects": arr}).to_string())
+}
+
+/// 注入探测（各软件 rules/agents 载体现状）
+fn api_inject_probe(stream: &mut TcpStream) -> Result<(), String> {
+    resp(stream, 200, &serde_json::to_string(&crate::inject::probe()).unwrap())
+}
+
+/// 注入执行：{target, remove?:bool, force?:bool}
+fn api_inject_do(data_dir: &std::path::Path, body: &str, stream: &mut TcpStream) -> Result<(), String> {
+    let v: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(_) => return resp(stream, 400, r#"{"error":"body 不是 JSON"}"#),
+    };
+    let target = v["target"].as_str().unwrap_or("").to_string();
+    if target.is_empty() {
+        return resp(stream, 400, r#"{"error":"缺 target"}"#);
+    }
+    let out = if v["remove"].as_bool().unwrap_or(false) {
+        crate::inject::remove(&target)
+    } else {
+        crate::inject::inject(&target, &data_dir.to_string_lossy(), v["force"].as_bool().unwrap_or(false), false)
+    };
+    resp(stream, 200, &out.to_string())
+}
+
 fn api_remember(data_dir: &std::path::Path, body: &str, stream: &mut TcpStream) -> Result<(), String> {
     let v: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
@@ -299,72 +492,147 @@ fn api_sync(data_dir: &std::path::Path, stream: &mut TcpStream) -> Result<(), St
 /// 单页 UI：检索 + 列表 + 详情 + 新增 + 删除 + 同步
 const PAGE: &str = r#"<!DOCTYPE html>
 <html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>memlite 记忆管理</title>
+<title>memlite 记忆</title>
 <style>
-:root{--bg:#111418;--card:#1a1f26;--fg:#d8dee6;--dim:#7a8494;--gold:#e8b64c;--line:#2a313b;--err:#e06c6c}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.6 system-ui,"Noto Sans CJK SC",sans-serif}
-.wrap{max-width:960px;margin:0 auto;padding:20px}
-h1{font-size:18px;color:var(--gold);margin:0 0 4px}
-#meta{color:var(--dim);font-size:12px;margin-bottom:16px}
-.bar{display:flex;gap:8px;margin-bottom:14px}
-input,textarea{background:var(--card);border:1px solid var(--line);color:var(--fg);border-radius:6px;padding:8px 10px;font:inherit}
-input:focus,textarea:focus{outline:none;border-color:var(--gold)}
-#q{flex:1}
-button{background:var(--card);border:1px solid var(--line);color:var(--fg);border-radius:6px;padding:8px 14px;cursor:pointer;font:inherit}
-button:hover{border-color:var(--gold);color:var(--gold)}
-button.gold{background:var(--gold);color:#111;border-color:var(--gold);font-weight:600}
-button.small{padding:3px 10px;font-size:12px}
-.item{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 14px;margin-bottom:10px;cursor:pointer}
-.item:hover{border-color:var(--gold)}
-.item .t{font-weight:600;margin-bottom:2px}
-.item .m{color:var(--dim);font-size:12px}
-.item .c{color:#aeb7c4;font-size:13px;margin-top:6px;white-space:pre-wrap;max-height:88px;overflow:hidden}
-#detail{display:none;background:var(--card);border:1px solid var(--gold);border-radius:8px;padding:16px;margin-bottom:14px}
-#detail pre{white-space:pre-wrap;font:inherit;margin:8px 0}
-#addbox{display:none;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px;margin-bottom:14px}
-#addbox textarea{width:100%;min-height:90px;margin-bottom:8px;resize:vertical}
-#status{font-size:13px;min-height:20px;margin:8px 0}
-.ok{color:var(--gold)}.err{color:var(--err)}.dim{color:var(--dim)}
-.muted{color:var(--dim);font-size:12px}
-</style></head><body><div class="wrap">
-<h1>memlite 记忆管理</h1>
+:root{--bg:#f2f3f5;--panel:#fff;--text:#27292d;--muted:#82858d;--line:#eaecef;--accent:#6856c9;--soft:#f7f8fa;--hover:#eeeef2;--black:#242527;--green:#4c927a;--red:#c05b5b;--shadow:0 5px 22px #21242d05,0 1px 4px #21242d03;
+--ui-font:"LXGW Marker Gothic","霞鹜漫黑","SF Pro Text","PingFang SC","Microsoft YaHei",sans-serif;
+--read-font:"LXGW Marker Gothic","霞鹜漫黑","Source Han Serif SC","Noto Serif CJK SC","Songti SC",serif}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.7 var(--ui-font);-webkit-font-smoothing:antialiased}
+button,input,textarea{font:inherit;color:inherit}button{cursor:pointer;border:0;background:none;transition:background .16s,color .16s}button:active{filter:brightness(.97)}button:disabled{opacity:.4;cursor:default}
+input,textarea{outline:none}::selection{background:#ded7fb}::-webkit-scrollbar{width:5px}::-webkit-scrollbar-thumb{background:#c4c5cc60;border-radius:8px}
+.app{max-width:880px;margin:0 auto;padding:28px 20px 60px}
+header{display:flex;align-items:baseline;gap:12px;margin-bottom:4px}
+h1{font-size:20px;font-weight:600;margin:0}
+h1 em{font-style:normal;color:var(--accent)}
+#meta{color:var(--muted);font-size:13px;margin-bottom:18px}
+.panel{background:var(--panel);box-shadow:var(--shadow);border:1px solid var(--line);border-radius:20px}
+.searchbar{display:flex;gap:10px;padding:10px;margin-bottom:12px}
+.searchbar input{flex:1;border:1px solid var(--line);border-radius:10px;padding:10px 14px;background:var(--soft)}
+.searchbar input:focus{border-color:var(--accent);background:var(--panel)}
+.b{display:inline-flex;align-items:center;gap:6px;border-radius:10px;padding:10px 17px;background:var(--panel);border:1px solid var(--line);font-weight:500;white-space:nowrap}
+.b:hover{background:var(--hover)}
+.b.primary{color:#fff;background:var(--black);border-color:var(--black)}
+.b.primary:hover{background:#3d3d43}
+.b.small{padding:5px 12px;font-size:13px;border-radius:8px}
+.tools{display:flex;gap:8px;padding:0 10px 10px;flex-wrap:wrap}
+.tools .b{color:var(--muted);font-weight:400}
+.box{margin-bottom:12px;padding:16px 18px}
+.box textarea{width:100%;min-height:100px;margin:8px 0;border:1px solid var(--line);border-radius:10px;padding:10px 14px;background:var(--soft);resize:vertical;font-family:var(--read-font);line-height:1.9}
+.box input{width:100%;border:1px solid var(--line);border-radius:10px;padding:10px 14px;background:var(--soft);margin-bottom:4px}
+.box textarea:focus,.box input:focus{border-color:var(--accent);background:var(--panel)}
+#status{font-size:13px;min-height:22px;margin:10px 2px;color:var(--muted)}
+#status.ok{color:var(--accent)}#status.err{color:var(--red)}
+.item{display:block;width:100%;text-align:left;padding:16px 20px;border-bottom:1px solid var(--line)}
+.item:last-child{border-bottom:0}.item:hover{background:var(--soft)}
+.item .t{font-weight:600;font-size:15px;margin-bottom:3px}
+.item .m{color:var(--muted);font-size:12.5px;display:flex;gap:10px;flex-wrap:wrap}
+.item .c{color:#5a5e66;font-size:13.5px;margin-top:6px;white-space:pre-wrap;max-height:84px;overflow:hidden;font-family:var(--read-font);line-height:1.9}
+.tag{display:inline-block;background:var(--soft);border:1px solid var(--line);border-radius:6px;padding:0 7px;font-size:12px;color:var(--muted)}
+.score{color:var(--accent);font-weight:500}
+#detail{display:none;margin-bottom:12px;padding:20px 24px;border:1px solid var(--accent)}
+#detail .dt{font-size:16px;font-weight:600}
+#detail pre{white-space:pre-wrap;font:inherit;font-family:var(--read-font);line-height:2.05;margin:10px 0;font-size:14.5px}
+#detail .ops{display:flex;gap:8px;margin-top:8px}
+.dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:#58a98b;box-shadow:0 0 0 3px #58a98b10;margin-right:4px;vertical-align:1px}
+nav{display:flex;gap:2px;margin-bottom:14px;border-bottom:1px solid var(--line)}
+nav button{padding:9px 18px;font-size:14px;font-weight:500;color:var(--muted);border-bottom:2px solid transparent;margin-bottom:-1px}
+nav button:hover{color:var(--text);background:var(--hover)}
+nav button.on{color:var(--accent);border-bottom-color:var(--accent)}
+.chip{display:inline-flex;align-items:center;gap:5px;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:6px 12px;margin:0 6px 8px 0;cursor:pointer;font-size:13px}
+.chip:hover{border-color:var(--accent);color:var(--accent)}
+.chip .n{color:var(--muted);font-size:12px}
+.tagcloud{padding:16px 20px}
+.ver{border-left:3px solid var(--line);padding:6px 0 6px 14px;margin:10px 0}
+.ver.cur{border-left-color:var(--accent)}
+.ver .vh{font-size:12.5px;color:var(--muted)}
+.ver .vc{font-family:var(--read-font);line-height:1.9;margin-top:4px;white-space:pre-wrap}
+#more-wrap{text-align:center;margin:16px 0}
+.muted{color:var(--muted)}
+</style></head><body><div class="app">
+<header><h1><em>mem</em>lite 记忆</h1></header>
+<nav>
+  <button id="tab-mem" class="on" onclick="tab('mem')">记忆</button>
+  <button id="tab-time" onclick="tab('time')">时间线</button>
+  <button id="tab-tags" onclick="tab('tags')">标签 · 项目</button>
+  <button id="tab-inject" onclick="tab('inject')">注入</button>
+</nav>
 <div id="meta">加载中…</div>
 <div id="status"></div>
-<div class="bar">
-  <input id="q" placeholder="搜索记忆（语义检索，项目级空自动回退用户级）">
-  <button class="gold" onclick="doSearch()">搜索</button>
-  <button onclick="toggleAdd()">＋新增</button>
-  <button onclick="doSync()">同步到 Git</button>
+<div class="panel searchbar">
+  <input id="q" placeholder="搜索记忆（留空＝列最近）">
+  <button class="b primary" onclick="doSearch()">搜索</button>
+  <button class="b" onclick="toggleAdd()">＋ 新增</button>
+  <button class="b" onclick="doSync()">同步</button>
 </div>
-<div id="addbox">
-  <input id="nt" placeholder="标题（留空自动截正文首句）" style="width:100%;margin-bottom:8px">
+<div class="tools">
+  <button class="b small" onclick="doExport()">导出 JSON</button>
+  <button class="b small" onclick="doCompact()">压实库</button>
+  <button class="b small" onclick="doReembed()">回填向量</button>
+  <button class="b small" onclick="showConfig()">配置</button>
+</div>
+<div id="addbox" class="panel box" style="display:none">
+  <input id="nt" placeholder="标题（留空自动截正文首句）">
   <textarea id="nc" placeholder="记忆正文（口令/证件号等敏感信息会拒入）"></textarea>
-  <div class="bar" style="margin:0"><input id="ntags" placeholder="标签，逗号分隔"><button class="gold" onclick="doAdd()">保存</button></div>
+  <div style="display:flex;gap:10px"><input id="ntags" placeholder="标签，逗号分隔" style="flex:1;margin:0"><button class="b primary" onclick="doAdd()">保存</button></div>
 </div>
-<div id="detail"></div>
-<div id="list"></div>
+<div id="editbox" class="panel box" style="display:none;border-color:var(--accent)">
+  <input id="et" placeholder="标题">
+  <textarea id="ec" placeholder="正文" style="min-height:130px"></textarea>
+  <div style="display:flex;gap:10px"><input id="etags" placeholder="标签，逗号分隔" style="flex:1;margin:0"><button class="b primary" onclick="doEdit()">保存修改</button><button class="b" onclick="$('editbox').style.display='none'">取消</button></div>
+</div>
+<div id="view-mem">
+  <div id="detail"></div>
+  <div id="list" class="panel"></div>
+  <div id="more-wrap"><button id="more" class="b" style="display:none" onclick="loadMore()">加载更多</button></div>
+</div>
+<div id="view-time" style="display:none"><div id="timeline"></div></div>
+<div id="view-tags" style="display:none"><div id="tagview" class="panel tagcloud">加载中…</div></div>
+<div id="view-inject" style="display:none"><div id="injectview" class="panel tagcloud">加载中…</div></div>
 </div>
 <script>
 const $=id=>document.getElementById(id);
-function say(t,cls){$('status').innerHTML='<span class="'+(cls||'dim')+'">'+t+'</span>'}
+function say(t,cls){$('status').textContent=t;$('status').className=cls||''}
 async function j(url,opts){const r=await fetch(url,opts);const d=await r.json();if(!r.ok)throw Error(d.error||r.status);return d}
+let MODE='list',OFFSET=0,LIMIT=30,EDIT_ID=null;
+function dt(ts){const d=new Date(ts*1000);const p=n=>String(n).padStart(2,'0');return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes())}
 async function load(){try{const s=await j('/api/status');
-  $('meta').textContent='数据目录 '+s.data_dir+'　·　'+s.records+' 条记忆　·　向量 '+s.vectors+(s.project_dir?'　·　项目级':'　·　用户级')+(s.embedding.configured?'　·　语义检索':'　·　词面检索');
+  $('meta').innerHTML='<span class="dot"></span>'+(s.project_dir?'项目级':'用户级')+'　'+s.records+' 条记忆　向量 '+s.vectors+'　'+(s.embedding.configured?'语义检索':'词面检索')+'　<span class="muted">'+s.data_dir+'</span>';
   if(s.bad_lines) say('警告：'+s.bad_lines+' 行损坏','err');
   await doSearch('');}catch(e){say('加载失败：'+e.message,'err')}}
+function itemHtml(r,score){return '<button class="item" onclick="show(\''+r.id+'\')"><div class="t">'+esc(r.title||'(无标题)')+'</div><div class="m"><span>'+dt(r.ts)+'</span>'+(score!==undefined?'<span class="score">'+score.toFixed(3)+'</span>':'')+((r.tags||[]).map(t=>'<span class="tag">'+esc(t)+'</span>').join(''))+(r.project?'<span class="muted">'+esc(r.project)+'</span>':'')+'</div><div class="c">'+esc((r.content||'').slice(0,170))+'</div></button>'}
 async function doSearch(preset){const q=preset!==undefined?preset:$('q').value.trim();
-  if(!q){const d=await j('/api/search?q='+encodeURIComponent(' ')+'&limit=0').catch(()=>null);
-    // 空查询列最近：用 limit 大、q 用空不行——直接拿 status 之外用 search 空兜底，改为拉 show 不适用；简化：空查询提示
-    $('list').innerHTML='<div class="muted">输入关键词搜索；或点「同步」旁新增。</div>';return}
+  if(!q){MODE='list';OFFSET=0;
+    try{const d=await j('/api/list?limit='+LIMIT+'&offset=0');
+      say('最近 '+d.items.length+' 条 / 共 '+d.total);
+      $('list').innerHTML=d.items.map(r=>itemHtml(r)).join('')||'<div class="item muted">库是空的</div>';
+      $('more').style.display=d.total>OFFSET+LIMIT?'inline-flex':'none';
+    }catch(e){say('列取失败：'+e.message,'err')}return}
+  MODE='search';OFFSET=0;
   try{const d=await j('/api/search?q='+encodeURIComponent(q)+'&limit=30');
-    say((d.backend==='semantic'?'语义':'词面')+'检索 '+d.hits.length+' 条'+(d.fallback?'（项目级无命中已回退用户级）':''));
-    $('list').innerHTML=d.hits.map(h=>'<div class="item" onclick="show(\''+h.id+'\')"><div class="t">'+esc(h.title)+'</div><div class="m">'+new Date(h.ts*1000).toLocaleString()+'　分数 '+h.score+(h.tags&&h.tags.length?'　#'+h.tags.join(' #'):'')+'</div><div class="c">'+esc((h.content||'').slice(0,160))+'</div></div>').join('')||'<div class="muted">无命中</div>';
+    say((d.backend==='semantic'?'语义':'词面')+'检索 '+d.hits.length+' 条'+(d.fallback?'（项目级无命中已回退用户级）':''),'ok');
+    $('list').innerHTML=d.hits.map(h=>itemHtml(h,h.score)).join('')||'<div class="item muted">无命中</div>';
+    $('more').style.display='none';
   }catch(e){say('搜索失败：'+e.message,'err')}}
+async function loadMore(){OFFSET+=LIMIT;
+  try{const d=await j('/api/list?limit='+LIMIT+'&offset='+OFFSET);
+    $('list').insertAdjacentHTML('beforeend',d.items.map(r=>itemHtml(r)).join(''));
+    say('已加载 '+(OFFSET+d.items.length)+' / '+d.total);
+    if(OFFSET+d.items.length>=d.total)$('more').style.display='none';
+  }catch(e){say(e.message,'err')}}
 async function show(id){try{const r=await j('/api/show?id='+encodeURIComponent(id));
   $('detail').style.display='block';
-  $('detail').innerHTML='<div class="t" style="font-weight:600">'+esc(r.title)+'</div><div class="muted">'+new Date(r.ts*1000).toLocaleString()+'　id: '+r.id+(r.project?'　project: '+esc(r.project):'')+'</div><pre>'+esc(r.content)+'</pre><button class="small" onclick="del(\''+r.id+'\')">删除这条</button> <button class="small" onclick="$(\'detail\').style.display=\'none\'">关闭</button>';
-  $('detail').scrollIntoView({behavior:'smooth',block:'center'});
+  $('detail').className='panel';
+  $('detail').innerHTML='<div class="dt">'+esc(r.title||'(无标题)')+'</div><div class="muted" style="font-size:12.5px;margin-top:2px">'+dt(r.ts)+'　id: '+r.id+(r.project?'　project: '+esc(r.project):'')+'</div><pre>'+esc(r.content)+'</pre><div class="ops"><button class="b small" onclick="showVersions(\''+r.id+'\')">版本历史</button><button class="b small" onclick="edit(\''+r.id+'\')">编辑</button><button class="b small" onclick="del(\''+r.id+'\')">删除</button><button class="b small" onclick="$(\'detail\').style.display=\'none\'">关闭</button></div>';
+  $('detail').scrollIntoView({behavior:'smooth',block:'nearest'});
 }catch(e){say(e.message,'err')}}
+async function edit(id){try{const r=await j('/api/show?id='+encodeURIComponent(id));
+  EDIT_ID=r.id;$('et').value=r.title;$('ec').value=r.content;$('etags').value=(r.tags||[]).join(',');
+  $('editbox').style.display='block';$('editbox').scrollIntoView({behavior:'smooth',block:'center'});
+}catch(e){say(e.message,'err')}}
+async function doEdit(){if(!EDIT_ID)return;try{
+  const d=await j('/api/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:EDIT_ID,title:$('et').value,content:$('ec').value,tags:$('etags').value.split(',').map(s=>s.trim()).filter(Boolean)})});
+  say('已更新 '+d.id,'ok');$('editbox').style.display='none';$('detail').style.display='none';doSearch();
+}catch(e){say('更新失败：'+e.message,'err')}}
 async function del(id){if(!confirm('确认删除？'))return;try{await j('/api/forget',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});
   say('已删除','ok');$('detail').style.display='none';doSearch();}catch(e){say('删除失败：'+e.message,'err')}}
 function toggleAdd(){const b=$('addbox');b.style.display=b.style.display==='none'?'block':'none'}
@@ -373,10 +641,60 @@ async function doAdd(){const content=$('nc').value.trim();if(!content){say('正�
     say('已存 '+d.id+'「'+d.title+'」','ok');$('nc').value='';$('nt').value='';$('ntags').value='';$('addbox').style.display='none';doSearch();
   }catch(e){say(e.message,'err')}}
 async function doSync(){say('同步中…');try{const d=await j('/api/sync',{method:'POST'});
-  say((d.verified?'同步成功':'核验异常')+'　commit '+(d.committed?'已提交（本地无变更则跳过）':'无新变更')+'　'+d.local_sha.slice(0,8),'ok');
+  say((d.verified?'同步成功':'核验异常')+'　'+(d.committed?'已提交':'无新变更')+'　'+d.local_sha.slice(0,8),'ok');
 }catch(e){say('同步失败：'+e.message,'err')}}
+function doExport(){window.open('/api/export','_blank')}
+async function doCompact(){if(!confirm('压实库：只留存活记录重写单文件？多机并发期间勿跑。'))return;say('压实中…');
+  try{const d=await j('/api/compact',{method:'POST'});say('压实完成：'+d.lines_before+' 行 → '+d.records+' 条存活','ok');doSearch();
+  }catch(e){say('压实失败：'+e.message,'err')}}
+async function doReembed(){say('回填向量中…（按条调 API，稍候）');
+  try{const d=await j('/api/reembed',{method:'POST'});say('回填 '+d.embedded+' 条，失败 '+d.failed+'，侧车 '+d.vectors+' / 共 '+d.total,'ok');load();
+  }catch(e){say('回填失败：'+e.message,'err')}}
+async function showConfig(){try{const d=await j('/api/config');
+  const e=d.embedding;say('api_base: '+(e.api_base||'（未配）')+'　model: '+(e.model||'—')+'　api_key: '+(e.api_key||'—')+'　项目级: '+(d.project_dir||'无'));
+}catch(e){say('读配置失败：'+e.message,'err')}}
 function esc(s){return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
 $('q').addEventListener('keydown',e=>{if(e.key==='Enter')doSearch()});
-load();
-</script></body></html>
+let CURTAB='mem';
+function tab(t){CURTAB=t;
+  for(const x of ['mem','time','tags','inject']){
+    $('tab-'+x).className=x===t?'on':'';
+    $('view-'+x).style.display=x===t?'':'none'}
+  if(t==='time')loadTimeline();
+  if(t==='tags')loadTags();
+  if(t==='inject')loadInject();
+  if(t==='mem')say('')}
+async function loadTimeline(){try{const d=await j('/api/list?limit=300&offset=0');
+  const byDay={};for(const r of d.items){const k=new Date(r.ts*1000).toISOString().slice(0,10);(byDay[k]=byDay[k]||[]).push(r)}
+  const days=Object.keys(byDay).sort().reverse();
+  $('timeline').innerHTML=days.map(day=>{
+    const rows=byDay[day].map(r=>'<button class="item" style="border-bottom:1px solid var(--line)" onclick="tab(\'mem\');show(\''+r.id+'\')"><div class="t">'+esc(r.title||'(无标题)')+'</div><div class="m"><span>'+dt(r.ts).slice(11)+'</span>'+((r.tags||[]).map(t=>'<span class="tag">'+esc(t)+'</span>').join(''))+'</div></button>').join('');
+    return '<div class="panel" style="margin-bottom:12px"><div style="padding:12px 20px 0;font-weight:600;color:var(--accent)">'+day+' <span class="muted" style="font-weight:400">· '+byDay[day].length+' 条</span></div>'+rows+'</div>';
+  }).join('')||'<div class="panel muted" style="padding:20px">无记录</div>';
+  say('时间线：近 '+d.items.length+' 条 / 共 '+d.total+'（更早的用记忆页搜索）');
+}catch(e){say('时间线加载失败：'+e.message,'err')}}
+async function loadTags(){try{const [t,p]=await Promise.all([j('/api/tags'),j('/api/projects')]);
+  $('tagview').innerHTML='<div style="font-weight:600;margin-bottom:8px">标签</div>'+
+    (t.tags.map(x=>'<span class="chip" onclick="tab(\'mem\');$(\'q\').value=\''+esc(x.tag)+'\';doSearch()">#'+esc(x.tag)+' <span class="n">'+x.count+'</span></span>').join('')||'<span class="muted">无标签</span>')+
+    '<div style="font-weight:600;margin:14px 0 8px">项目</div>'+
+    (p.projects.map(x=>'<span class="chip" onclick="tab(\'mem\');$(\'q\').value=\''+esc(x.project)+'\';doSearch()">'+esc(x.project)+' <span class="n">'+x.count+'</span></span>').join(''));
+}catch(e){say('标签加载失败：'+e.message,'err')}}
+async function loadInject(){try{const d=await j('/api/inject');
+  $('injectview').innerHTML='<div style="font-weight:600;margin-bottom:10px">软件注入点探测</div><div class="muted" style="margin-bottom:10px">把 memlite 规则写入各 AI 软件的 rules/AGENTS.md 载体；已有 respire/1memory 规则的会拒绝双注入。</div>'+
+    d.map(x=>{const st=x.state==='fresh'?'<span style="color:var(--green)">已注入</span>':x.state==='conflict'?'<span style="color:var(--red)">他系已占</span>':x.state==='stale'?'<span style="color:var(--accent)">待更新</span>':'未注入';
+    const ops=x.state==='fresh'||x.state==='stale'?'<button class="b small" onclick="injectDo(\''+x.target+'\',true)">移除</button> <button class="b small" onclick="injectDo(\''+x.target+'\',false)">更新</button>':'<button class="b small" onclick="injectDo(\''+x.target+'\',false)">注入</button>';
+    return '<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--line)"><div><div style="font-weight:500">'+x.target+'</div><div class="muted" style="fontSize:12px">'+esc(x.path)+'</div></div><div style="display:flex;gap:8px;align-items:center">'+st+ops+'</div></div>'}).join('');
+}catch(e){say('注入探测失败：'+e.message,'err')}}
+async function injectDo(target,remove){if(!remove&&!confirm('向 '+target+' 注入 memlite 规则？'))return;if(remove&&!confirm('移除 '+target+' 的 memlite 规则块？'))return;
+  try{const d=await j('/api/inject',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target,remove})});
+    say((remove?'已移除 ':'已处理 ')+target+(d.hint?'（'+d.hint+'）':''),'ok');loadInject();
+  }catch(e){say(e.message,'err')}}
+async function showVersions(id){try{const d=await j('/api/versions?id='+encodeURIComponent(id));
+  $('detail').style.display='block';$('detail').className='panel';
+  $('detail').innerHTML='<div style="font-weight:600">版本历史 · '+d.versions.length+' 版</div><div class="muted" style="font-size:12.5px">append-only 日志天然保历史；最新版在最后</div>'+
+    d.versions.map((v,i)=>'<div class="ver'+(i===d.versions.length-1?' cur':'')+'"><div class="vh">'+dt(v.ts)+(i===d.versions.length-1?'　（当前）':'')+'</div><div class="vc">'+esc((v.content||'').slice(0,300))+'</div></div>').join('')+
+    '<button class="b small" onclick="show(\''+id+'\')">返回详情</button>';
+  $('detail').scrollIntoView({behavior:'smooth',block:'center'});
+}catch(e){say(e.message,'err')}}
+load();</script></body></html>
 "#;
