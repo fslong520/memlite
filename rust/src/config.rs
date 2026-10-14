@@ -8,11 +8,18 @@
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
+/// 家目录：HOME（Linux/macOS）→ USERPROFILE（Windows）→ "."
+pub fn home_dir() -> String {
+    std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".into())
+}
+
 pub fn user_config_path() -> PathBuf {
     if let Ok(p) = std::env::var("MEMLITE_CONFIG") {
         return PathBuf::from(p);
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let home = home_dir();
     PathBuf::from(home).join(".memlite/config.json")
 }
 
@@ -65,7 +72,7 @@ pub fn user_data_dir() -> PathBuf {
             return PathBuf::from(d);
         }
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let home = home_dir();
     PathBuf::from(home).join("memlite-data")
 }
 
@@ -156,7 +163,7 @@ fn value_into(key: &str, value: &str) -> Value {
 
 fn shellexpand_home(v: &str) -> String {
     if let Some(rest) = v.strip_prefix("~/") {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+        let home = home_dir();
         format!("{home}/{rest}")
     } else {
         v.to_string()

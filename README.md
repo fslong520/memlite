@@ -131,7 +131,8 @@ memlite-data/
 该文件就是注入源，再嵌即双 always_on。
 
 **手动注入与修改**：`memlite inject --print` 出块文本随你粘进任意文件；
-块外内容永远安全，块内以注入源为准（重跑按源刷新，想留住自定义就改注入源或改后不再重跑）——细则见 [docs/INJECT.md](docs/INJECT.md)。
+仓库附带现成的 [docs/memlite-rules.md](docs/memlite-rules.md)（与 `--emit` 逐字一致，单测守护），
+下载手改即可；块外内容永远安全，块内以注入源为准（重跑按源刷新，想留住自定义就改注入源或改后不再重跑）——细则见 [docs/INJECT.md](docs/INJECT.md)。
 
 ## 协议
 

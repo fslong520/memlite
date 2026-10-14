@@ -113,8 +113,10 @@ memlite inject --emit     # rules 档生成独立文件＋拷贝引导表
 1. **出块文本手动粘**：`memlite inject --print` 把块嵌正文（`<!-- memlite:begin -->` 外壳＋
    注入源全文）打到 stdout，不写任何文件——粘进任意文件都行（不限目标矩阵：团队 wiki、
    他方工具的自定义指令文件皆可）。
-2. **出独立文件手动放**：`memlite inject --emit [FILE]` 生成通用 rules 文件（无块标记），
-   按打印出的拷贝表 `cp` / `cat >>` 各目标。
+2. **拿现成文件手动放**：仓库直接附带 [docs/memlite-rules.md](../docs/memlite-rules.md)
+   （通用 rules 正文，无块标记；与 `memlite inject --emit` 输出逐字一致，单测守护不漂移，
+   Release 资产同名附带）——不跑命令，下载改好按表 `cp` / `cat >>` 各目标即可；
+   也可以现跑 `memlite inject --emit [FILE]` 重新生成。
 3. **纯手抄**：就用上面的最小模板，自己贴进目标文件。
 
 **修改规则（重要）**：

@@ -210,7 +210,7 @@ fn run(cli: Cli, dir: &PathBuf) -> i32 {
             let cfg = std::env::var("MEMLITE_CONFIG")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| {
-                    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+                    let home = config::home_dir();
                     PathBuf::from(home).join(".memlite/config.json")
                 });
             if let Some(p) = cfg.parent() {

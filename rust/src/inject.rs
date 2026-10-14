@@ -78,7 +78,7 @@ pub const SOURCE: &str = "~/.qoder/rules/AGENTS.md";
 
 fn expand(p: &str) -> PathBuf {
     let raw = if let Some(rest) = p.strip_prefix("~/") {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        let home = crate::config::home_dir();
         format!("{home}/{rest}")
     } else {
         p.to_string()
@@ -344,6 +344,18 @@ mod tests {
         assert!(out.contains(&src.display().to_string()));
         assert!(!out.contains("秘密正文"));
         assert_eq!(out.matches(BEGIN).count(), 1);
+    }
+
+    /// 仓库附带的通用 rules 文件必须与 standalone_text() 逐字一致（漂移即红）。
+    #[test]
+    fn repo_rules_file_matches_standalone() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/memlite-rules.md");
+        let text = fs::read_to_string(&path).expect("docs/memlite-rules.md 应随仓库存在");
+        assert_eq!(
+            text,
+            standalone_text(),
+            "docs/memlite-rules.md 与 inject::standalone_text() 漂移——重跑 `memlite inject --emit docs/memlite-rules.md` 更新并提交"
+        );
     }
 
     #[test]

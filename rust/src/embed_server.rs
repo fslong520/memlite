@@ -36,7 +36,7 @@ fn find_model_dir(explicit: Option<String>) -> Result<PathBuf, String> {
     if let Some(d) = explicit {
         return Ok(PathBuf::from(d));
     }
-    let home = std::env::var("HOME").unwrap_or_default();
+    let home = crate::config::home_dir();
     let candidates = [
         std::env::var("MEMLITE_MODEL_DIR").ok(),
         if home.is_empty() {
