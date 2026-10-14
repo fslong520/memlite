@@ -1,4 +1,20 @@
-# memlite — 简化嵌入式记忆系统
+# memlite — 可嵌入的本地记忆引擎
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+**单文件二进制（~2.2MB，Rust，零运行时依赖）**：把它放进你的产品，用 CLI / HTTP / 数据文件三契约任一接入，用户即拥有完整的本地记忆——语义+词面双档检索、git 同步、项目级/用户级两档、敏感闸、Web 管理台、rules 注入。
+
+> **嵌入指南：[docs/EMBEDDING.md](docs/EMBEDDING.md)** —— 三条接入路径、完整 API 表、退出码契约、分发清单。
+
+快速体验：
+
+```bash
+cargo build --release --manifest-path rust/Cargo.toml   # 或拿现成二进制
+memlite init                      # 建库
+memlite remember "第一条记忆" --title "事实句标题"
+memlite recall "查询"             # 语义/词面自动选档
+memlite web --port 7879           # 管理台 http://127.0.0.1:7879/
+```
 
 明文 JSON 存储 + GitHub 私有仓同步 + rules 注入。为低配嵌入式设备设计：零重型依赖、无守护进程、无应用层加密。
 
@@ -100,3 +116,7 @@ memlite-data/
 | 兜底 | `~/AGENTS.md` | 块嵌（多数 harness 认 AGENTS.md） |
 
 目标文件已有 respire/1memory 规则时拒绝注入（防双记忆系统同文件打架），`--force` 可强注。重复注入幂等。
+
+## 协议
+
+MIT，见 [LICENSE](LICENSE)。数据仓是**你的私有数据**：本仓开源，用户的 `memory.jsonl` 不在此列——同步目标必须是 private 仓库，转 public 即安全假设失效。
