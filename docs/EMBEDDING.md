@@ -1,11 +1,12 @@
 # 把 memlite 嵌进你的产品
 
-memlite 是**可嵌入的记忆引擎**：一个单文件二进制（~2.2MB，Rust 编译，零运行时依赖），
-你的产品把它带在身边，用三种契约之一接入，用户就拥有完整的本地记忆能力。
+memlite 是**可嵌入的记忆引擎**：一个单文件二进制（~27MB，Rust 编译，零运行时依赖，
+静态链入 ONNX Runtime——端侧语义档一体），你的产品把它带在身边，用三种契约之一接入，
+用户就拥有完整的本地记忆能力。
 
 ```
 你的产品
- ├── bin/memlite            ← 随包分发（2.2MB 单文件）
+ ├── bin/memlite            ← 随包分发（27MB 单文件，零运行时依赖）
  │     ├── CLI 契约          ← 任何语言 shell out 即可（推荐，最稳）
  │     ├── HTTP 契约         ← `memlite web` 起本地回环服务
  │     └── 数据契约          ← memory.jsonl 开放格式，直接读写也行
@@ -116,17 +117,61 @@ memlite config set embedding.model     BAAI/bge-m3
 ```
 
 API key 只存用户级 `~/.memlite/config.json`（永不入数据仓），`config show` 脱敏回显。
-本机想跑零外网的本地模型，用仓库自带的嵌入服务子命令（源码 `rust/src/embed_server.rs`）：
+
+### 端侧服务（零外网语义档）
+
+用仓库自带的嵌入服务子命令（源码 `rust/src/embed_server.rs`）：
 
 ```bash
-cargo build --release                            # 单二进制，ort 静态链入
+cargo build --release                                # 单二进制，ort 静态链入
 ./target/release/memlite embed-server --port 18321   # OpenAI 兼容 /v1/embeddings
 ```
 
-bge-m3 ONNX 量化版（模型目录三级回退：`MEMLITE_MODEL_DIR` → `~/.rsrs/models/bge-m3`
-→ `/usr/lib/respire/models/bge-m3`）；CLS 池化＋L2 归一化，与旧 Python 版同契约。
-推理线程默认 min(cpu/2, 4)，`MEMLITE_EMBED_THREADS` 覆盖；systemd 用户单元开机自启即可
-（`ExecStart=…/memlite embed-server --host 127.0.0.1 --port 18321`）。
+**模型**（bge-m3 ONNX，取自 Hugging Face `Xenova/bge-m3`，本地见 `MODEL-SOURCE.json`）——
+自动下载不可靠，手动放置：
+
+```
+~/.rsrs/models/bge-m3/
+├── tokenizer.json
+└── onnx/model_quantized.onnx
+```
+
+目录三级回退：`MEMLITE_MODEL_DIR` → `~/.rsrs/models/bge-m3` → `/usr/lib/respire/models/bge-m3`。
+CLS 池化＋L2 归一化，与旧 Python 版同契约。
+
+**systemd 用户单元（开机自启，`~/.config/systemd/user/memlite-embed.service`）**：
+
+```ini
+[Unit]
+Description=memlite embed-server (bge-m3 ONNX, port 18321)
+
+[Service]
+ExecStart=/usr/local/bin/memlite embed-server --host 127.0.0.1 --port 18321
+Environment=MEMLITE_EMBED_THREADS=2
+Nice=10
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user daemon-reload && systemctl --user enable --now memlite-embed
+```
+
+**接入与验证一条龙**：
+
+```bash
+memlite config set embedding.api_base http://127.0.0.1:18321/v1
+memlite config set embedding.model bge-m3-local
+memlite config set embedding.api_key local-noauth     # 本机服务不校验，占位即可
+curl -s http://127.0.0.1:18321/health                # {"status":"ok",...}
+memlite reembed                                       # 老记忆回填向量
+memlite recall "查询" --json | head                   # backend 应为 "semantic"
+```
+
+推理线程默认 min(cpu/2, 4)，`MEMLITE_EMBED_THREADS` 覆盖。
 
 注意：同一文本在不同推理运行时（如 PyPI onnxruntime wheel 与 ort 发行包）产出的向量
 不逐位重合（自余弦≈0.99）——向量是派生数据，切换运行时后用 `memlite reembed` 全量重建，

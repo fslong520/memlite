@@ -2,9 +2,10 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**单文件二进制（~2.2MB，Rust，零运行时依赖）**：把它放进你的产品，用 CLI / HTTP / 数据文件三契约任一接入，用户即拥有完整的本地记忆——语义+词面双档检索、git 同步、项目级/用户级两档、敏感闸、Web 管理台、三档注入（rules/memory/AGENTS.md 覆盖 24 个国内外主流 AI 产品，`memlite inject --emit` 一键出拷贝引导表）。
+**单文件二进制（~27MB，Rust，零运行时依赖——静态链入 ONNX Runtime，端侧语义档一体）**：把它放进你的产品，用 CLI / HTTP / 数据文件三契约任一接入，用户即拥有完整的本地记忆——语义+词面双档检索、git 同步、项目级/用户级两档、敏感闸、Web 管理台、三档注入（rules/memory/AGENTS.md 覆盖 24 个国内外主流 AI 产品，`memlite inject --emit` 一键出拷贝引导表）。
 
 > **嵌入指南：[docs/EMBEDDING.md](docs/EMBEDDING.md)** —— 三条接入路径、完整 API 表、退出码契约、分发清单。
+> **注入指南：[docs/INJECT.md](docs/INJECT.md)** —— 三档 24 产品矩阵、注入提示词（正文与模板）、命令与防呆。
 
 快速体验：
 
@@ -16,7 +17,7 @@ memlite recall "查询"             # 语义/词面自动选档
 memlite web --port 7879           # 管理台 http://127.0.0.1:7879/
 ```
 
-明文 JSON 存储 + GitHub 私有仓同步 + rules 注入。为低配嵌入式设备设计：零重型依赖、无守护进程、无应用层加密。
+明文 JSON 存储 + GitHub 私有仓同步 + rules 注入。为低配设备设计：零重型依赖、常驻进程仅可选的 `embed-server` 与 `web`（均只绑回环）、无应用层加密。
 
 安全边界 = 数据仓可见性：记忆明文存本地 `memory.jsonl`，push 到用户自建 **private** 仓库。仓库转 public 即安全失效。
 
@@ -114,20 +115,19 @@ memlite-data/
 
 `.gitignore` 已排除 `.env`、`*.token`、`session*`、`secret*`、`*.key`、`.git-credentials`。同步只 add 白名单文件，从不 `git add -A`。
 
-## rules 注入点
+## 注入（三档 24 产品）
 
-| 软件 | 路径 | 方式 |
-|---|---|---|
-| Qoder | `~/.qoder/rules/AGENTS.md` | **注入源**：inject 读其全文嵌入下方各目标；自身不注块（rules 每会话常驻，再注成双 always_on） |
-| Claude Code | `~/.claude/CLAUDE.md` | 块嵌 `<!-- memlite:begin/end -->` |
-| Codex | `~/.codex/AGENTS.md` | 块嵌 |
-| CodeBuddy | `~/.codebuddy/CODEBUDDY.md` | 块嵌 |
-| WorkBuddy | `~/.workbuddy/MEMORY.md` | 块嵌（lite 指针版，4000 字符上限内） |
-| pi | `~/.pi/AGENTS.md` | 块嵌 |
-| kylinbot | `~/.kylinbot/workspace/AGENTS.md` | 块嵌 |
-| 兜底 | `~/AGENTS.md` | 块嵌（多数 harness 认 AGENTS.md） |
+| 档 | 方式 | 代表目标 | 命令 |
+|---|---|---|---|
+| ① rules 档（8 家） | 不自动写，`--emit` 出独立文件＋拷贝表 | Qoder/Cursor/Windsurf/Zed/Cline/Roo… | `memlite inject --emit` |
+| ② memory 档（5 家） | 块嵌 `<!-- memlite:begin/end -->` | CLAUDE.md/GEMINI.md/copilot-instructions… | `memlite inject --target claude` |
+| ③ agents 档（11 家） | 块嵌 | Codex/opencode/DeepSeek/Qwen/豆包…/兜底 `~/AGENTS.md` | `memlite inject --all` |
 
-注入正文 = `~/.qoder/rules/AGENTS.md` 全文（单一事实源，改规则只改它；读不到/为空即报错拒注）。目标文件已有 respire/1memory 规则时拒绝注入（防双记忆系统同文件打架），`--force` 可强注。重复注入幂等。
+**注入提示词正文** = 注入源 `~/.qoder/rules/AGENTS.md` 全文（单一事实源，改规则只改它，
+重跑注入逐字刷新；读不到/为空即报错拒注）。目标已有 respire/1memory 规则时拒绝双注入
+（`--force` 强注），重复注入幂等。没有 Qoder 规则文件的用户，先按
+[docs/INJECT.md](docs/INJECT.md) 的最小模板落一份再注入；Qoder 自身不注块——
+该文件就是注入源，再嵌即双 always_on。
 
 ## 协议
 
