@@ -140,17 +140,24 @@ pub fn sync(data_dir: &Path) -> Result<SyncReport, String> {
         git(&repo, &args)?;
     }
 
-    // 2. 有暂存变更才 commit
+    // 2. 只提交白名单文件——commit 必须带路径限定！否则会把工作区里
+    //    用户已暂存的无关改动一并卷进 memlite 的同步提交（2026-10-14 复现）。
+    //    用 `git diff --cached --quiet -- <paths>` 判「白名单自身有无变更」。
     let staged = Command::new("git")
         .arg("-C")
         .arg(&repo)
-        .args(["diff", "--cached", "--quiet"])
+        .args(["diff", "--cached", "--quiet", "--"])
+        .args(&add_paths)
         .output()
         .map_err(|e| e.to_string())?;
-    let committed = !staged.status.success();
+    let committed = add_paths.is_empty() == false && !staged.status.success();
     if committed {
         let msg = format!("memlite sync {}", chrono_lite());
-        git(&repo, &["commit", "-m", &msg])?;
+        let mut args = vec!["commit", "-m", &msg, "--"];
+        for f in &add_paths {
+            args.push(f);
+        }
+        git(&repo, &args)?;
     }
 
     // 3. fetch；远端分支已存在才 rebase（首推时远端可能为空仓）
@@ -158,7 +165,9 @@ pub fn sync(data_dir: &Path) -> Result<SyncReport, String> {
     let branch = git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"])?;
     let remote_ref = git(&repo, &["ls-remote", "--heads", "origin", &branch]).unwrap_or_default();
     if !remote_ref.is_empty() {
-        git(&repo, &["pull", "--rebase", "origin", &branch])?;
+        // --autostash：工作区有用户未提交/已暂存改动时先 stash 再 rebase、完事还原——
+        // 否则项目级记忆随工作区仓同步会被用户手头的半成品卡死（2026-10-14 复现）
+        git(&repo, &["pull", "--rebase", "--autostash", "origin", &branch])?;
     }
 
     // 4. push -u
