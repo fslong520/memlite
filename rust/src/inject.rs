@@ -35,7 +35,7 @@ pub fn rules_text(data_dir: &str, lite: bool) -> String {
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| data_dir.to_string());
     let mut s = format!(
-        "{BEGIN}\n# memlite 记忆系统\n\n本机记忆库：`{abs}`（明文 JSONL，GitHub 私有仓同步）。\n\n## 铁律\n\n1. 答前先查：`memlite recall \"项目名+关键词\"`——未查不开答。\n2. 收尾必存：新事实/决策/教训 `memlite remember \"内容\" --title \"…\"`。\n3. --title 必须写事实句（主语＋动作＋关键实体或结果），禁只写主题分类名——检索靠词面与正文，分类名等于没写。\n4. 删改用 `memlite show <id>` 确认后 `memlite forget <id>`，禁直接改数据文件。\n5. 同步：`memlite sync`（只 add 白名单数据文件，push 后核验 sha）。\n6. 数据仓是私有仓假设；禁止把 token/密钥写进记忆正文。\n"
+        "{BEGIN}\n# memlite 记忆系统\n\n本机记忆库：`{abs}`（明文 JSONL，GitHub 私有仓同步）。\n\n## 铁律\n\n1. 答前先查：`memlite recall \"项目名+关键词\"`——未查不开答。\n2. 收尾必存：新事实/决策/教训 `memlite remember \"内容\" --title \"…\"`。\n3. --title 必须写事实句（主语＋动作＋关键实体或结果），禁只写主题分类名——检索靠词面与正文，分类名等于没写。\n4. 改旧条用 `memlite update <id>`——传要改的 `--title`/`--content`/`--tags`（标题同样可改，未传字段保留原值）；整条纠错或合并先 `show <id>` 确认，再 `forget` + `remember`。禁直接改数据文件。\n5. 同步：`memlite sync`（只 add 白名单数据文件，push 后核验 sha）。\n6. 数据仓是私有仓假设；禁止把 token/密钥写进记忆正文。\n"
     );
     if lite {
         s.push_str(&format!("全量规则见 `{abs}/../rules.md`。\n"));

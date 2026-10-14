@@ -79,6 +79,7 @@ python3 -m memlite remember "内容" --title "事实句标题"
 python3 -m memlite recall "查询"                 # 自动选档；--bm25 强制词面
 python3 -m memlite reembed                       # 给旧记忆回填向量（配了 API）
 python3 -m memlite show <id> / list / forget <id>
+python3 -m memlite update <id> --title "新标题" --content "改后正文"   # 就地改，未传字段保留
 python3 -m memlite sync                          # git 同步（白名单 add + sha 双通道核验）
 python3 -m memlite status
 python3 -m memlite inject --probe                # 看各软件 rules 注入点现状

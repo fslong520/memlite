@@ -62,7 +62,7 @@ enum Cmd {
     },
     /// 删记忆
     Forget { id: String },
-    /// 就地改一条（同 id 追加新版本，末写胜出；id/标签/项目保留除非显式给）
+    /// 就地改一条（同 id 追加新版本，末写胜出；未传的标题/正文/标签保留原值——显式 --title 即改标题）
     Update {
         id: String,
         #[arg(long)]

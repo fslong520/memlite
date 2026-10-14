@@ -25,7 +25,7 @@ memlite remember "内容" --title "事实句" --json
 memlite recall "查询" --limit 10 --json        # 语义/词面自动选档，含 fallback 字段
 memlite show <id> --json
 memlite list --limit 50 --json
-memlite update <id> --content "改后正文" --json
+memlite update <id> --title "新标题" --content "改后正文" --json   # 只传要改的字段，其余保留
 memlite forget <id> --json
 memlite sync --json                           # git 同步，sha 双通道核验
 memlite status --json                         # 条数/向量/文件/sync 状态
