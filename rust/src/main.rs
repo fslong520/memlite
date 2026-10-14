@@ -1,9 +1,10 @@
 //! memlite CLI——简化嵌入式记忆系统（Rust 版）。
-//! 命令面：init/remember/recall/show/list/forget/sync/inject/reembed/status/compact/bench。
+//! 命令面：init/remember/recall/show/list/forget/sync/inject/reembed/status/compact/bench/web/embed-server。
 
 mod bench;
 mod config;
 mod embed;
+mod embed_server;
 mod inject;
 mod search;
 mod sensitive;
@@ -110,6 +111,16 @@ enum Cmd {
     Web {
         #[arg(long, default_value_t = 7879)]
         port: u16,
+    },
+    /// 本地嵌入服务：bge-m3 ONNX 量化版，OpenAI 兼容 /v1/embeddings（缺省只绑 127.0.0.1）
+    EmbedServer {
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        #[arg(long, default_value_t = 18321)]
+        port: u16,
+        /// 模型目录（缺省三级回退：MEMLITE_MODEL_DIR → ~/.rsrs/models/bge-m3 → /usr/lib/respire/models/bge-m3）
+        #[arg(long)]
+        model_dir: Option<String>,
     },
     /// 查看/写配置（分层：项目级 > 用户级；set 缺省写用户级，--project 写项目级）
     Config {
@@ -573,6 +584,11 @@ fn run(cli: Cli, dir: &PathBuf) -> i32 {
                     1
                 }
             }
+        }
+
+        Cmd::EmbedServer { host, port, model_dir } => {
+            embed_server::serve(host, port, model_dir);
+            0
         }
 
         Cmd::Config { action } => match action {

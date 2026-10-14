@@ -10,8 +10,8 @@
 //! - 零框架：std TcpListener 手写 HTTP 子集（同 memlite web 手法），只绑回环地址
 //! - 推理线程：默认 min(cpu/2, 4)，MEMLITE_EMBED_THREADS 覆盖（本机供电敏感，宁慢勿快）
 //!
-//! 构建：cargo build --release --features embed-server --bin memlite-embed
-//! 运行：target/release/memlite-embed [--host 127.0.0.1] [--port 18321] [--model-dir DIR]
+//! 构建：`cargo build --release`（已并入主二进制）
+//! 运行：`memlite embed-server [--host 127.0.0.1] [--port 18321] [--model-dir DIR]`
 
 use ort::session::Session;
 use ort::value::TensorRef;
@@ -31,40 +31,7 @@ const MODEL_NAME: &str = "bge-m3-local";
 const MAX_LEN: usize = 512;
 const INPUT_MSG: &str = "input 须为非空字符串或非空字符串数组";
 
-struct Args {
-    host: String,
-    port: u16,
-    model_dir: Option<String>,
-}
-
-fn parse_args() -> Result<Args, String> {
-    let mut args = Args {
-        host: "127.0.0.1".to_string(),
-        port: 18321,
-        model_dir: None,
-    };
-    let mut it = std::env::args().skip(1);
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "--host" => args.host = it.next().ok_or("--host 缺值")?,
-            "--port" => {
-                let v = it.next().ok_or("--port 缺值")?;
-                args.port = v.parse().map_err(|_| format!("--port 非法: {v}"))?;
-            }
-            "--model-dir" => args.model_dir = Some(it.next().ok_or("--model-dir 缺值")?),
-            "-h" | "--help" => {
-                println!(
-                    "用法: memlite-embed [--host 127.0.0.1] [--port 18321] [--model-dir DIR]"
-                );
-                std::process::exit(0);
-            }
-            other => return Err(format!("未知参数: {other}")),
-        }
-    }
-    Ok(args)
-}
-
-/// 模型目录三级回退（与 python `_find_model_dir` 一致）。
+/// 模型目录三级回退（与旧 Python 版一致）。
 fn find_model_dir(explicit: Option<String>) -> Result<PathBuf, String> {
     if let Some(d) = explicit {
         return Ok(PathBuf::from(d));
@@ -343,15 +310,9 @@ fn handle(mut stream: TcpStream, emb: &Arc<Mutex<Embedder>>) -> Result<(), Strin
     }
 }
 
-fn main() {
-    let args = match parse_args() {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("{e}");
-            std::process::exit(2);
-        }
-    };
-    let dir = match find_model_dir(args.model_dir.clone()) {
+/// 常驻服务：加载模型→监听→循环 accept（错误路径 eprintln+exit，同旧版行为）。
+pub fn serve(host: String, port: u16, model_dir: Option<String>) {
+    let dir = match find_model_dir(model_dir) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("{e}");
@@ -375,10 +336,10 @@ fn main() {
             std::process::exit(1);
         }
     };
-    eprintln!("memlite embed server 就绪: http://{}:{}/v1/embeddings", args.host, args.port);
+    eprintln!("memlite embed server 就绪: http://{host}:{port}/v1/embeddings");
     eprintln!("模型: {}（dim 探测于首次请求，ONNX 量化版，推理线程 {threads}）", dir.display());
 
-    let addr = format!("{}:{}", args.host, args.port);
+    let addr = format!("{host}:{port}");
     let listener = match TcpListener::bind(&addr) {
         Ok(l) => l,
         Err(e) => {

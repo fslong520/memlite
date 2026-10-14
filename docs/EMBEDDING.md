@@ -116,17 +116,17 @@ memlite config set embedding.model     BAAI/bge-m3
 ```
 
 API key 只存用户级 `~/.memlite/config.json`（永不入数据仓），`config show` 脱敏回显。
-本机想跑零外网的本地模型，用仓库自带的 Rust 版嵌入服务（源码 `rust/src/bin/embed_server.rs`）：
+本机想跑零外网的本地模型，用仓库自带的嵌入服务子命令（源码 `rust/src/embed_server.rs`）：
 
 ```bash
-cargo build --release --features embed-server --bin memlite-embed   # 单文件，ort 静态链入
-./target/release/memlite-embed --port 18321                         # OpenAI 兼容 /v1/embeddings
+cargo build --release                            # 单二进制，ort 静态链入
+./target/release/memlite embed-server --port 18321   # OpenAI 兼容 /v1/embeddings
 ```
 
 bge-m3 ONNX 量化版（模型目录三级回退：`MEMLITE_MODEL_DIR` → `~/.rsrs/models/bge-m3`
 → `/usr/lib/respire/models/bge-m3`）；CLS 池化＋L2 归一化，与旧 Python 版同契约。
 推理线程默认 min(cpu/2, 4)，`MEMLITE_EMBED_THREADS` 覆盖；systemd 用户单元开机自启即可
-（`ExecStart=…/memlite-embed --host 127.0.0.1 --port 18321`）。
+（`ExecStart=…/memlite embed-server --host 127.0.0.1 --port 18321`）。
 
 注意：同一文本在不同推理运行时（如 PyPI onnxruntime wheel 与 ort 发行包）产出的向量
 不逐位重合（自余弦≈0.99）——向量是派生数据，切换运行时后用 `memlite reembed` 全量重建，

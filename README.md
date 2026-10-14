@@ -50,6 +50,16 @@ memlite web --port 7879    # 打开 http://127.0.0.1:7879/
 
 单页管理界面：语义搜索（两档自动回退）、详情/删除、新增（带敏感闸）、一键 git 同步。零框架手写 HTTP，**只监听 127.0.0.1**（明文库不对外），写接口做同源 Origin 校验防 CSRF。
 
+## 端侧嵌入服务（零外网语义档）
+
+```bash
+memlite embed-server --port 18321    # bge-m3 ONNX 量化版，OpenAI 兼容 /v1/embeddings
+```
+
+单二进制内嵌 ONNX Runtime（ort 静态链入）。模型目录三级回退：`MEMLITE_MODEL_DIR` →
+`~/.rsrs/models/bge-m3` → `/usr/lib/respire/models/bge-m3`；推理线程默认 min(cpu/2, 4)，
+`MEMLITE_EMBED_THREADS` 覆盖。systemd 用户单元 `ExecStart=…/memlite embed-server` 即开机自启。
+
 ## 项目级记忆（工作区优先）
 
 工作区里有含 `config.json` 的 `.memlite/` 或 `memlite-data/` 文件夹（从 cwd 向上找，不越过 git 根）→ 该项目的记忆读写全部落它，不落用户级库；找不到才回用户级。项目级 data_dir 随工作区 git 一起 `memlite sync`（提交进外层仓）。
