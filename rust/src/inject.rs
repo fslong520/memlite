@@ -10,6 +10,9 @@
 //!    豆包/Grok/pi/dsh/kylinbot…），块嵌追加，通用兜底 ~/AGENTS.md。
 //!
 //! `memlite inject --emit` 生成系统级 rules 全文（memlite-rules.md）并打印逐产品拷贝表。
+//!
+//! 块嵌正文 = ~/.qoder/rules/AGENTS.md 全文（单一事实源，读不到即报错拒注）。
+//! qoder 自身勿再块嵌——该文件本身是注入源，再嵌即双 always_on 互相冲淡。
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -70,6 +73,9 @@ pub const TARGETS: &[Target] = &[
         note: "兜底：多数 harness 都读工作目录或家目录的 AGENTS.md" },
 ];
 
+/// 注入正文的单一事实源：Qoder 规则文件
+pub const SOURCE: &str = "~/.qoder/rules/AGENTS.md";
+
 fn expand(p: &str) -> PathBuf {
     let raw = if let Some(rest) = p.strip_prefix("~/") {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
@@ -80,20 +86,31 @@ fn expand(p: &str) -> PathBuf {
     PathBuf::from(raw)
 }
 
-/// 块嵌正文（写进他方文件的 <BEGIN>…<END> 块）
-pub fn rules_text(data_dir: &str, lite: bool) -> String {
-    let abs = fs::canonicalize(data_dir)
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| data_dir.to_string());
-    let mut s = format!(
-        "{BEGIN}\n# memlite 记忆系统\n\n本机记忆库：`{abs}`（明文 JSONL，GitHub 私有仓同步）。\n\n## 铁律\n\n1. 答前先查：`memlite recall \"项目名+关键词\"`——未查不开答。\n2. 收尾必存：新事实/决策/教训 `memlite remember \"内容\" --title \"…\"`。\n3. --title 必须写事实句（主语＋动作＋关键实体或结果），禁只写主题分类名——检索靠词面与正文，分类名等于没写。\n4. 改旧条用 `memlite update <id>`——传要改的 `--title`/`--content`/`--tags`（标题同样可改，未传字段保留原值）；整条纠错或合并先 `show <id>` 确认，再 `forget` + `remember`。禁直接改数据文件。\n5. 同步：`memlite sync`（只 add 白名单数据文件，push 后核验 sha）。\n6. 数据仓是私有仓假设；禁止把 token/密钥写进记忆正文。\n"
-    );
-    if lite {
-        s.push_str(&format!("全量规则见 `{abs}/../rules.md`。\n"));
+pub fn source_path() -> PathBuf {
+    expand(SOURCE)
+}
+
+pub fn rules_text(lite: bool) -> Result<String, String> {
+    rules_text_from(&source_path(), lite)
+}
+
+/// 正文取注入源全文包进 BEGIN/END；lite（4000 字符上限目标）只嵌指针。
+/// 源缺失/不可读/为空一律 Err——正文以该文件为准，不静默回退旧文本。
+fn rules_text_from(source: &Path, lite: bool) -> Result<String, String> {
+    let text = fs::read_to_string(source).map_err(|e| {
+        format!("读不到注入源 {}：{e}——先修该文件再注入", source.display())
+    })?;
+    if text.trim().is_empty() {
+        return Err(format!("注入源 {} 是空文件，拒绝注入", source.display()));
     }
-    s.push_str(END);
-    s.push('\n');
-    s
+    if lite {
+        return Ok(format!(
+            "{BEGIN}\n# memlite 记忆系统\n\n全量规则见 `{}`（Qoder 每会话常驻的注入源）。\n{END}\n",
+            source.display()
+        ));
+    }
+    let body = text.trim_end_matches('\n');
+    Ok(format!("{BEGIN}\n{body}\n{END}\n"))
 }
 
 /// 独立系统级 rules 文件全文（emit 用；整文件语义，无块标记、不含本机路径）
@@ -135,7 +152,7 @@ pub fn check_state(path: &Path) -> &'static str {
     }
 }
 
-pub fn inject(target: &str, data_dir: &str, force: bool, lite: bool) -> serde_json::Value {
+pub fn inject(target: &str, force: bool, lite: bool) -> serde_json::Value {
     let Some(t) = TARGETS.iter().find(|t| t.name == target && t.auto) else {
         let known = TARGETS.iter().any(|t| t.name == target);
         return if known {
@@ -152,10 +169,17 @@ pub fn inject(target: &str, data_dir: &str, force: bool, lite: bool) -> serde_js
             "hint": "目标已有 respire/1memory 规则，拒绝双注入；确需则 --force"
         });
     }
+    let block = match rules_text(lite) {
+        Ok(b) => b,
+        Err(e) => {
+            return serde_json::json!({
+                "target": target, "path": path, "state": state, "changed": false, "error": e
+            })
+        }
+    };
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let block = rules_text(data_dir, lite);
     let existing = fs::read_to_string(&path).unwrap_or_default();
     let new_text = if existing.contains(BEGIN) && existing.contains(END) {
         let pre = existing.split(BEGIN).next().unwrap_or("");
@@ -269,4 +293,99 @@ pub fn emit_json(out_file: &str) -> serde_json::Value {
         })
         .collect();
     serde_json::json!({"file": out_file, "targets": rows})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("memlite-inject-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn rules_text_wraps_source_fulltext() {
+        let d = tmp("wrap");
+        let src = d.join("AGENTS.md");
+        fs::write(&src, "# 规则正文\n\n两档检索。\n").unwrap();
+        let out = rules_text_from(&src, false).unwrap();
+        assert_eq!(out.matches(BEGIN).count(), 1);
+        assert_eq!(out.matches(END).count(), 1);
+        assert!(out.contains("# 规则正文"));
+        assert!(out.contains("两档检索"));
+        assert!(out.trim_end().ends_with(END));
+    }
+
+    #[test]
+    fn rules_text_missing_source_errors() {
+        let d = tmp("missing");
+        let err = rules_text_from(&d.join("nope.md"), false).unwrap_err();
+        assert!(err.contains("读不到注入源"), "got: {err}");
+    }
+
+    #[test]
+    fn rules_text_empty_source_errors() {
+        let d = tmp("empty");
+        let src = d.join("AGENTS.md");
+        fs::write(&src, "   \n").unwrap();
+        let err = rules_text_from(&src, false).unwrap_err();
+        assert!(err.contains("空文件"), "got: {err}");
+    }
+
+    #[test]
+    fn rules_text_lite_is_pointer_only() {
+        let d = tmp("lite");
+        let src = d.join("AGENTS.md");
+        fs::write(&src, "# 秘密正文不该出现\n").unwrap();
+        let out = rules_text_from(&src, true).unwrap();
+        assert!(out.contains(&src.display().to_string()));
+        assert!(!out.contains("秘密正文"));
+        assert_eq!(out.matches(BEGIN).count(), 1);
+    }
+
+    #[test]
+    fn check_state_cycle() {
+        let d = tmp("state");
+        let p = d.join("T.md");
+        assert_eq!(check_state(&p), "absent");
+        fs::write(&p, format!("head\n{BEGIN}\nx\n{END}\n")).unwrap();
+        assert_eq!(check_state(&p), "fresh");
+        fs::write(&p, format!("{BEGIN}\nx\n{END}\n{BEGIN}\ny\n{END}\n")).unwrap();
+        assert_eq!(check_state(&p), "stale");
+        fs::write(&p, "respire 规则在此\n").unwrap();
+        assert_eq!(check_state(&p), "conflict");
+    }
+
+    /// 端到端：假 HOME 下注入→幂等→源缺失拒注。HOME 为进程级，靠单测集中占用。
+    #[test]
+    fn e2e_inject_fake_home() {
+        let old_home = std::env::var("HOME").ok();
+        let home = tmp("home");
+        fs::create_dir_all(home.join(".qoder/rules")).unwrap();
+        fs::write(home.join(".qoder/rules/AGENTS.md"), "# memlite 记忆工作流\n").unwrap();
+        std::env::set_var("HOME", &home);
+
+        let first = inject("claude", false, false);
+        assert_eq!(first["changed"], true, "first: {first}");
+        let target = home.join(".claude/CLAUDE.md");
+        let text = fs::read_to_string(&target).unwrap();
+        assert!(text.contains("# memlite 记忆工作流"));
+        assert_eq!(text.matches(BEGIN).count(), 1);
+
+        let second = inject("claude", false, false);
+        assert_eq!(second["changed"], false, "idempotent: {second}");
+
+        fs::remove_file(home.join(".qoder/rules/AGENTS.md")).unwrap();
+        let fail = inject("claude", false, false);
+        assert_eq!(fail["changed"], false);
+        assert!(fail["error"].as_str().unwrap().contains("读不到注入源"), "fail: {fail}");
+
+        match old_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+    }
 }

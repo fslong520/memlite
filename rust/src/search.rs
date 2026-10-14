@@ -1,4 +1,4 @@
-//! 检索层：BM25-lite（中英混合分词）+ 余弦语义，与 Python 版同参数。
+//! 检索层：BM25-lite（中英混合分词）+ 余弦语义。
 
 use crate::store::Record;
 use std::collections::{HashMap, HashSet};
@@ -43,7 +43,7 @@ pub fn tokenize(text: &str) -> Vec<String> {
 }
 
 fn is_cjk(c: char) -> bool {
-    // 与 Python 版 _TOKEN_RE [一-鿿] 严格一致：仅 U+4E00–U+9FFF。
+    // CJK 词界仅 U+4E00–U+9FFF（历史口径，勿扩全 CJK）：
     // 全角标点（，。 U+3000/FF00 段）是分隔符不是词——当词切会改变文档长度，
     // BM25 分数随之漂移（对拍发现过 0.7% 差）。
     matches!(c as u32, 0x4E00..=0x9FFF)

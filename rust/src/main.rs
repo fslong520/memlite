@@ -1,6 +1,7 @@
 //! memlite CLI——简化嵌入式记忆系统（Rust 版）。
-//! 命令面与 Python 版对齐：init/remember/recall/show/list/forget/sync/inject/reembed/status/compact。
+//! 命令面：init/remember/recall/show/list/forget/sync/inject/reembed/status/compact/bench。
 
+mod bench;
 mod config;
 mod embed;
 mod inject;
@@ -77,7 +78,7 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
-    /// rules 注入（三档：rules 整文件 / memory 块嵌 / agents 块嵌）
+    /// rules 注入（三档：rules 整文件 / memory 块嵌 / agents 块嵌；正文取 ~/.qoder/rules/AGENTS.md 全文，读不到即拒注）
     Inject {
         #[arg(long)]
         target: Option<String>,
@@ -99,6 +100,12 @@ enum Cmd {
     Status,
     /// 压实（只留存活重写回单文件）
     Compact,
+    /// 检索命中率评测：20 条真实形态记忆 × 20 改写型查询，报 hit@1/hit@3（临时库）
+    Bench {
+        /// 语义档：须配嵌入 API，未配置或嵌入失败退出码 2
+        #[arg(long)]
+        semantic: bool,
+    },
     /// 内置 Web 管理界面（本地回环）
     Web {
         #[arg(long, default_value_t = 7879)]
@@ -463,11 +470,10 @@ fn run(cli: Cli, dir: &PathBuf) -> i32 {
                 println!("{}", serde_json::to_string_pretty(&v).unwrap());
                 return 0;
             }
-            let dir_s = dir.to_string_lossy().into_owned();
             let results: Vec<serde_json::Value> = if all {
-                inject::TARGETS.iter().filter(|t| t.auto).map(|t| inject::inject(t.name, &dir_s, force, false)).collect()
+                inject::TARGETS.iter().filter(|t| t.auto).map(|t| inject::inject(t.name, force, false)).collect()
             } else if let Some(t) = target {
-                vec![inject::inject(&t, &dir_s, force, false)]
+                vec![inject::inject(&t, force, false)]
             } else {
                 eprintln!("须指定 --emit [文件] 或 --target <名> 或 --all 或 --probe 或 --remove <名>");
                 return 2;
@@ -555,6 +561,8 @@ fn run(cli: Cli, dir: &PathBuf) -> i32 {
                 }
             }
         }
+
+        Cmd::Bench { semantic } => bench::run(semantic, json),
 
         Cmd::Web { port } => {
             eprintln!("web 界面仅监听 127.0.0.1（明文库不对外）；Ctrl-C 退出");

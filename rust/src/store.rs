@@ -1,5 +1,5 @@
 //! 存储层：append-only JSONL + 16MB 分块轮转 + 内存索引。
-//! 语义与 Python 版一致：归档旧→新、活跃文件恒末，末写胜出。
+//! 归档旧→新、活跃文件恒末，末写胜出。
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

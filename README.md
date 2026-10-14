@@ -74,23 +74,24 @@ memlite config show        # 合并视图（api_key 脱敏）
 ## 命令
 
 ```bash
-python3 -m memlite init                          # 初始化数据仓与配置
-python3 -m memlite remember "内容" --title "事实句标题"
-python3 -m memlite recall "查询"                 # 自动选档；--bm25 强制词面
-python3 -m memlite reembed                       # 给旧记忆回填向量（配了 API）
-python3 -m memlite show <id> / list / forget <id>
-python3 -m memlite update <id> --title "新标题" --content "改后正文"   # 就地改，未传字段保留
-python3 -m memlite sync                          # git 同步（白名单 add + sha 双通道核验）
-python3 -m memlite status
-python3 -m memlite inject --probe                # 看各软件 rules 注入点现状
-python3 -m memlite inject --all                  # 注入（冲突自动跳过，--force 强注）
+memlite init                          # 初始化数据仓与配置
+memlite remember "内容" --title "事实句标题"
+memlite recall "查询"                 # 自动选档；--bm25 强制词面
+memlite reembed                       # 给旧记忆回填向量（配了 API）
+memlite show <id> / list / forget <id>
+memlite update <id> --title "新标题" --content "改后正文"   # 就地改，未传字段保留
+memlite sync                          # git 同步（白名单 add + sha 双通道核验）
+memlite status
+memlite inject --probe                # 看各软件 rules 注入点现状
+memlite inject --all                  # 注入（正文取 Qoder rules 全文；冲突自动跳过，--force 强注）
+memlite bench [--semantic]            # 检索命中率评测（临时库，报 hit@1/hit@3）
 ```
 
 标题规则（影响检索命中率，实测见下）：`--title` 必须写事实句——主语＋动作＋关键实体或结果；禁只写主题分类名。缺省则截正文首句 ≤40 字。
 
-## 检索命中率（bench.py）
+## 检索命中率（memlite bench）
 
-词面档 20 条真实形态记忆 × 20 改写型查询：**hit@1 85%、hit@3 85%**。漏检全部是查询与正文零词面重合的纯改写——这正是语义档的适用场景；配 API 后重跑 `python3 bench.py --semantic` 对比。
+词面档 20 条真实形态记忆 × 20 改写型查询：**hit@1 85%、hit@3 85%**；语义档 **hit@1 85%、hit@3 90%**。漏检全部是查询与正文零词面重合的纯改写——这正是语义档的适用场景；重跑 `memlite bench` / `memlite bench --semantic` 对比。
 
 ## 数据仓布局
 
@@ -107,16 +108,16 @@ memlite-data/
 
 | 软件 | 路径 | 方式 |
 |---|---|---|
-| Qoder | `~/.qoder/rules/xiaoyu-default.md` | 手工管理全文（不走 inject——再注一份会成双 always_on） |
+| Qoder | `~/.qoder/rules/AGENTS.md` | **注入源**：inject 读其全文嵌入下方各目标；自身不注块（rules 每会话常驻，再注成双 always_on） |
 | Claude Code | `~/.claude/CLAUDE.md` | 块嵌 `<!-- memlite:begin/end -->` |
 | Codex | `~/.codex/AGENTS.md` | 块嵌 |
 | CodeBuddy | `~/.codebuddy/CODEBUDDY.md` | 块嵌 |
-| WorkBuddy | `~/.workbuddy/MEMORY.md` | 块嵌（精简版，4000 字符上限内） |
+| WorkBuddy | `~/.workbuddy/MEMORY.md` | 块嵌（lite 指针版，4000 字符上限内） |
 | pi | `~/.pi/AGENTS.md` | 块嵌 |
 | kylinbot | `~/.kylinbot/workspace/AGENTS.md` | 块嵌 |
 | 兜底 | `~/AGENTS.md` | 块嵌（多数 harness 认 AGENTS.md） |
 
-目标文件已有 respire/1memory 规则时拒绝注入（防双记忆系统同文件打架），`--force` 可强注。重复注入幂等。
+注入正文 = `~/.qoder/rules/AGENTS.md` 全文（单一事实源，改规则只改它；读不到/为空即报错拒注）。目标文件已有 respire/1memory 规则时拒绝注入（防双记忆系统同文件打架），`--force` 可强注。重复注入幂等。
 
 ## 协议
 

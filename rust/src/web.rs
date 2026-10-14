@@ -113,7 +113,7 @@ fn handle(mut stream: TcpStream, data_dir: &std::path::Path) -> Result<(), Strin
         ("GET", "/api/tags") => api_tags(data_dir, &mut stream),
         ("GET", "/api/projects") => api_projects(data_dir, &mut stream),
         ("GET", "/api/inject") => api_inject_probe(&mut stream),
-        ("POST", "/api/inject") => api_inject_do(data_dir, &body, &mut stream),
+        ("POST", "/api/inject") => api_inject_do(&body, &mut stream),
         _ => resp(&mut stream, 404, r#"{"error":"not found"}"#),
     }
 }
@@ -386,8 +386,8 @@ fn api_inject_probe(stream: &mut TcpStream) -> Result<(), String> {
     resp(stream, 200, &serde_json::to_string(&crate::inject::probe()).unwrap())
 }
 
-/// 注入执行：{target, remove?:bool, force?:bool}
-fn api_inject_do(data_dir: &std::path::Path, body: &str, stream: &mut TcpStream) -> Result<(), String> {
+/// 注入执行：{target, remove?:bool, force?:bool}——正文取 ~/.qoder/rules/AGENTS.md 全文
+fn api_inject_do(body: &str, stream: &mut TcpStream) -> Result<(), String> {
     let v: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
         Err(_) => return resp(stream, 400, r#"{"error":"body 不是 JSON"}"#),
@@ -399,7 +399,7 @@ fn api_inject_do(data_dir: &std::path::Path, body: &str, stream: &mut TcpStream)
     let out = if v["remove"].as_bool().unwrap_or(false) {
         crate::inject::remove(&target)
     } else {
-        crate::inject::inject(&target, &data_dir.to_string_lossy(), v["force"].as_bool().unwrap_or(false), false)
+        crate::inject::inject(&target, v["force"].as_bool().unwrap_or(false), false)
     };
     resp(stream, 200, &out.to_string())
 }
@@ -680,13 +680,14 @@ async function loadTags(){try{const [t,p]=await Promise.all([j('/api/tags'),j('/
     (p.projects.map(x=>'<span class="chip" onclick="tab(\'mem\');$(\'q\').value=\''+esc(x.project)+'\';doSearch()">'+esc(x.project)+' <span class="n">'+x.count+'</span></span>').join(''));
 }catch(e){say('标签加载失败：'+e.message,'err')}}
 async function loadInject(){try{const d=await j('/api/inject');
-  $('injectview').innerHTML='<div style="font-weight:600;margin-bottom:10px">软件注入点探测</div><div class="muted" style="margin-bottom:10px">把 memlite 规则写入各 AI 软件的 rules/AGENTS.md 载体；已有 respire/1memory 规则的会拒绝双注入。</div>'+
+  $('injectview').innerHTML='<div style="font-weight:600;margin-bottom:10px">软件注入点探测</div><div class="muted" style="margin-bottom:10px">正文取 ~/.qoder/rules/AGENTS.md 全文（读不到即拒注），写入各 AI 软件的 rules/AGENTS.md 载体；已有 respire/1memory 规则的会拒绝双注入。</div>'+
     d.map(x=>{const st=x.state==='fresh'?'<span style="color:var(--green)">已注入</span>':x.state==='conflict'?'<span style="color:var(--red)">他系已占</span>':x.state==='stale'?'<span style="color:var(--accent)">待更新</span>':'未注入';
     const ops=x.state==='fresh'||x.state==='stale'?'<button class="b small" onclick="injectDo(\''+x.target+'\',true)">移除</button> <button class="b small" onclick="injectDo(\''+x.target+'\',false)">更新</button>':'<button class="b small" onclick="injectDo(\''+x.target+'\',false)">注入</button>';
     return '<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--line)"><div><div style="font-weight:500">'+x.target+'</div><div class="muted" style="fontSize:12px">'+esc(x.path)+'</div></div><div style="display:flex;gap:8px;align-items:center">'+st+ops+'</div></div>'}).join('');
 }catch(e){say('注入探测失败：'+e.message,'err')}}
 async function injectDo(target,remove){if(!remove&&!confirm('向 '+target+' 注入 memlite 规则？'))return;if(remove&&!confirm('移除 '+target+' 的 memlite 规则块？'))return;
   try{const d=await j('/api/inject',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target,remove})});
+    if(d.error){say('失败：'+d.error,'err');return}
     say((remove?'已移除 ':'已处理 ')+target+(d.hint?'（'+d.hint+'）':''),'ok');loadInject();
   }catch(e){say(e.message,'err')}}
 async function showVersions(id){try{const d=await j('/api/versions?id='+encodeURIComponent(id));
