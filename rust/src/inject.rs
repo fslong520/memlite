@@ -346,14 +346,15 @@ mod tests {
         assert_eq!(out.matches(BEGIN).count(), 1);
     }
 
-    /// 仓库附带的通用 rules 文件必须与 standalone_text() 逐字一致（漂移即红）。
+    /// 仓库附带的通用 rules 文件必须与 standalone_text() 逐字一致（漂移即红；行尾归一化——Windows 检出 CRLF）。
     #[test]
     fn repo_rules_file_matches_standalone() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/memlite-rules.md");
         let text = fs::read_to_string(&path).expect("docs/memlite-rules.md 应随仓库存在");
+        let lf = |s: &str| s.replace("\r\n", "\n");
         assert_eq!(
-            text,
-            standalone_text(),
+            lf(&text),
+            lf(&standalone_text()),
             "docs/memlite-rules.md 与 inject::standalone_text() 漂移——重跑 `memlite inject --emit docs/memlite-rules.md` 更新并提交"
         );
     }
