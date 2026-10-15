@@ -6,6 +6,7 @@ mod config;
 mod embed;
 mod embed_server;
 mod inject;
+mod querylog;
 mod search;
 mod sensitive;
 mod store;
@@ -110,6 +111,21 @@ enum Cmd {
         #[arg(long)]
         semantic: bool,
     },
+    /// 检索日志：查询流水＋命中次数（训练/复盘材料；写于 recall 与 web 检索）
+    Querylog {
+        /// 打印最近 N 条流水
+        #[arg(long, default_value_t = 0)]
+        recent: usize,
+        /// 导出训练集 JSONL 到文件（每行一次查询：query/backend/positive/hits）
+        #[arg(long)]
+        export: Option<PathBuf>,
+        /// 只导出该时间之后的（unix 秒）
+        #[arg(long, default_value_t = 0.0)]
+        since: f64,
+        /// 汇总里点名的高命中条数
+        #[arg(long, default_value_t = 10)]
+        top: usize,
+    },
     /// 内置 Web 管理界面（本地回环）
     Web {
         #[arg(long, default_value_t = 7879)]
@@ -156,6 +172,28 @@ fn emit(json: bool, value: serde_json::Value, human: &str) {
         println!("{}", serde_json::to_string_pretty(&value).unwrap());
     } else {
         println!("{human}");
+    }
+}
+
+/// id 取前 8 位（人读）
+fn short(id: &str) -> &str {
+    let n = id.len().min(8);
+    &id[..n]
+}
+
+/// unix 秒 → 本地时间；date 不可用时原样回数字
+fn fmt_ts(ts: f64) -> String {
+    let out = std::process::Command::new("date")
+        .args(["-d", &format!("@{ts}"), "+%Y-%m-%d %H:%M:%S"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    if out.is_empty() {
+        format!("{ts}")
+    } else {
+        out
     }
 }
 
@@ -207,21 +245,29 @@ fn run(cli: Cli, dir: &PathBuf) -> i32 {
     match cli.cmd {
         Cmd::Init => {
             std::fs::create_dir_all(dir).expect("建目录失败");
-            let cfg = std::env::var("MEMLITE_CONFIG")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| {
-                    let home = config::home_dir();
-                    PathBuf::from(home).join(".memlite/config.json")
-                });
-            if let Some(p) = cfg.parent() {
-                let _ = std::fs::create_dir_all(p);
+            // 显式 --data-dir / MEMLITE_DATA 指来的目录只就地初始化，不写回用户配置——
+            // 否则临时库会把 ~/.memlite/config.json 的 data_dir 顶掉、真库被静默绕过
+            // （2026-10-14 memprobe、2026-10-15 qlog-sync 两次踩同一坑）
+            let explicit = cli.data_dir.is_some() || std::env::var("MEMLITE_DATA").is_ok();
+            let mut wrote_cfg = false;
+            if !explicit {
+                let cfg = std::env::var("MEMLITE_CONFIG")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|_| {
+                        let home = config::home_dir();
+                        PathBuf::from(home).join(".memlite/config.json")
+                    });
+                if let Some(p) = cfg.parent() {
+                    let _ = std::fs::create_dir_all(p);
+                }
+                let mut cfg_v: serde_json::Value = std::fs::read_to_string(&cfg)
+                    .ok()
+                    .and_then(|t| serde_json::from_str(&t).ok())
+                    .unwrap_or_else(|| serde_json::json!({}));
+                cfg_v["data_dir"] = serde_json::json!(dir.to_string_lossy());
+                let _ = std::fs::write(&cfg, serde_json::to_string_pretty(&cfg_v).unwrap());
+                wrote_cfg = true;
             }
-            let mut cfg_v: serde_json::Value = std::fs::read_to_string(&cfg)
-                .ok()
-                .and_then(|t| serde_json::from_str(&t).ok())
-                .unwrap_or_else(|| serde_json::json!({}));
-            cfg_v["data_dir"] = serde_json::json!(dir.to_string_lossy());
-            let _ = std::fs::write(&cfg, serde_json::to_string_pretty(&cfg_v).unwrap());
             if !dir.join(".git").is_dir() {
                 let _ = std::process::Command::new("git")
                     .args(["init", "-b", "main"])
@@ -231,8 +277,13 @@ fn run(cli: Cli, dir: &PathBuf) -> i32 {
             let s = Store::open(dir);
             emit(
                 json,
-                serde_json::json!({"data_dir": dir, "records": s.count()}),
-                &format!("数据目录: {}\n记忆条数: {}", dir.display(), s.count()),
+                serde_json::json!({"data_dir": dir, "records": s.count(), "config_written": wrote_cfg}),
+                &format!(
+                    "数据目录: {}\n记忆条数: {}{}",
+                    dir.display(),
+                    s.count(),
+                    if wrote_cfg { "" } else { "\n（显式 --data-dir：未改用户配置）" }
+                ),
             );
             0
         }
@@ -287,6 +338,7 @@ fn run(cli: Cli, dir: &PathBuf) -> i32 {
         }
 
         Cmd::Recall { query, limit, project, bm25 } => {
+            let t0 = std::time::Instant::now();
             // 两档查序：解析库非用户级（项目级/--data-dir）且没搜到 → 自动回退用户级
             let (mut backend, mut hits) = recall_search(&dir, &query, limit, &project, bm25);
             let user_dir = config::user_data_dir();
@@ -298,6 +350,27 @@ fn run(cli: Cli, dir: &PathBuf) -> i32 {
                     hits = h2;
                     fallbacked = true;
                 }
+            }
+            // 落检索日志：一次查询一行（含零命中与回退），失败只提示不拦检索
+            let entry = querylog::Entry {
+                ts: store::now_ts(),
+                query: query.clone(),
+                backend: backend.to_string(),
+                limit,
+                fallback: if fallbacked { "user" } else { "" }.into(),
+                source: "cli".into(),
+                ms: t0.elapsed().as_millis() as u64,
+                hits: hits
+                    .iter()
+                    .map(|(sc, r)| querylog::Hit {
+                        id: r.id.clone(),
+                        score: *sc,
+                        title: r.title.clone(),
+                    })
+                    .collect(),
+            };
+            if let Err(e) = querylog::append_line(&dir, &entry) {
+                eprintln!("（检索日志写入失败：{e}）");
             }
             if json {
                 let arr: Vec<serde_json::Value> = hits
@@ -334,6 +407,89 @@ fn run(cli: Cli, dir: &PathBuf) -> i32 {
                     };
                     let head = head.replace('\n', " ");
                     println!("[{sc:.3}] {}  {head}", r.id);
+                }
+            }
+            0
+        }
+
+        Cmd::Querylog { recent, export, since, top } => {
+            // 导出走全文件（不吃内存尾窗），其余走常驻视图
+            if let Some(out) = export {
+                match querylog::export(&dir, &out, since) {
+                    Ok(n) => {
+                        emit(
+                            json,
+                            serde_json::json!({"exported": n, "path": out, "since": since}),
+                            &format!("已导出 {n} 次查询 → {}", out.display()),
+                        );
+                        return 0;
+                    }
+                    Err(e) => {
+                        eprintln!("{e}");
+                        return 1;
+                    }
+                }
+            }
+            let log = querylog::Log::load(&dir);
+            if recent > 0 {
+                let rows = log.recent_json(recent);
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&rows).unwrap());
+                } else if rows.is_empty() {
+                    println!("（检索日志为空——还没有 recall 过）");
+                } else {
+                    for r in &rows {
+                        println!(
+                            "{}  {}/{}  命中 {}  {}{}  「{}」",
+                            fmt_ts(r["ts"].as_f64().unwrap_or(0.0)),
+                            r["backend"].as_str().unwrap_or(""),
+                            r["source"].as_str().unwrap_or(""),
+                            r["hits"].as_array().map(|a| a.len()).unwrap_or(0),
+                            if r["ms"].as_u64().unwrap_or(0) > 0 {
+                                format!("{}ms  ", r["ms"].as_u64().unwrap_or(0))
+                            } else {
+                                String::new()
+                            },
+                            if r["fallback"].as_str().unwrap_or("").is_empty() {
+                                String::new()
+                            } else {
+                                "回退用户级  ".into()
+                            },
+                            r["query"].as_str().unwrap_or(""),
+                        );
+                    }
+                }
+                return 0;
+            }
+            let st = log.stats(top);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&st).unwrap());
+                return 0;
+            }
+            let b = &st["backend"];
+            let s = &st["source"];
+            println!(
+                "检索日志：窗口 {} 次查询（全量 {}，坏行 {}）",
+                st["queries_window"], st["queries_total"], st["bad_lines"]
+            );
+            if st["queries_window"].as_u64().unwrap_or(0) > 0 {
+                println!(
+                    "  档位 semantic {} · bm25 {}　来源 cli {} · web {}　回退用户级 {}",
+                    b["semantic"], b["bm25"], s["cli"], s["web"], st["fallback_user"]
+                );
+                println!(
+                    "  命中 平均 {} 条/次 · 零命中 {} 次 · 被召回过的记忆 {} 条",
+                    st["hits_avg"], st["zero_hit"], st["distinct_recalled"]
+                );
+                if let Some(top) = st["top"].as_array() {
+                    if !top.is_empty() {
+                        println!("  高命中：");
+                        for t in top {
+                            let title = t["title"].as_str().unwrap_or("");
+                            let title = if title.is_empty() { "(无标题)" } else { title };
+                            println!("    {:>4}  {}  {}", t["count"], short(t["id"].as_str().unwrap_or("")), title);
+                        }
+                    }
                 }
             }
             0

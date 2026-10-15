@@ -53,7 +53,8 @@ memlite web --port 7879    # 只绑 127.0.0.1，明文库不对外
 | GET | `/api/status` | 库状态（data_dir/条数/分层/嵌入配置） |
 | GET | `/api/search?q=&limit=` | 检索（`backend` 标语义/词面，`fallback` 标两档回退） |
 | GET | `/api/list?limit=&offset=` | 列最近（分页） |
-| GET | `/api/show?id=` | 单条全文 |
+| GET | `/api/show?id=` | 单条全文（附 `recall_count`：该条被召回次数） |
+| GET | `/api/querylog?limit=&top=` | 检索日志：`stats`（次数/档位/零命中/高命中 top）＋`recent` 流水 |
 | GET | `/api/versions?id=` | 同 id 全部历史版本（append-only 日志天然保历史） |
 | GET | `/api/tags` · `/api/projects` | 标签/项目频次 |
 | GET | `/api/inject` | 各 AI 软件注入点探测 |

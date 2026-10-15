@@ -381,6 +381,23 @@ mod tests {
     }
 
     #[test]
+    fn querylog_file_not_loaded_as_records() {
+        let d = tmp();
+        let mut s = Store::open(&d);
+        s.put("真记忆", "真", &[], "").unwrap();
+        // 检索日志同目录共存：既不当归档分块，也不计入坏行
+        std::fs::write(
+            d.join("memory.querylog.jsonl"),
+            r#"{"ts":1.0,"query":"q","backend":"bm25","limit":10,"hits":[]}"#,
+        )
+        .unwrap();
+        let s2 = Store::open(&d);
+        assert_eq!(s2.count(), 1);
+        assert_eq!(s2.bad_lines, 0);
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
     fn rotation_and_reload() {
         let d = tmp();
         let mut s = Store::open_with_chunk(&d, 500);

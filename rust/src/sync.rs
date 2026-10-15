@@ -214,6 +214,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn whitelist_covers_querylog() {
+        let d = std::env::temp_dir().join(format!("memlite-wl-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        for f in ["memory.jsonl", "memory.querylog.jsonl", "memory-1.jsonl", "emb.f32", "notes.txt"] {
+            std::fs::write(d.join(f), "x").unwrap();
+        }
+        let w = whitelisted(&d);
+        assert!(w.contains(&"memory.jsonl".to_string()));
+        assert!(w.contains(&"memory.querylog.jsonl".to_string()), "检索日志须随 sync 走白名单: {w:?}");
+        assert!(w.contains(&"memory-1.jsonl".to_string()));
+        assert!(!w.iter().any(|f| f == "emb.f32" || f == "notes.txt"));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
     fn find_repo_walks_up() {
         // tmp 仓：data_dir 是仓内子目录时应找到外层仓
         let d = std::env::temp_dir().join(format!("memlite-synctest-{}", std::process::id()));

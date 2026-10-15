@@ -49,7 +49,7 @@ memlite web --port 7879           # 管理台 http://127.0.0.1:7879/
 memlite web --port 7879    # 打开 http://127.0.0.1:7879/
 ```
 
-单页管理界面：语义搜索（两档自动回退）、详情/删除、新增（带敏感闸）、一键 git 同步。零框架手写 HTTP，**只监听 127.0.0.1**（明文库不对外），写接口做同源 Origin 校验防 CSRF。
+单页管理界面：语义搜索（两档自动回退）、详情/删除、新增（带敏感闸）、一键 git 同步，另有时间线、标签·项目、注入、检索日志页。零框架手写 HTTP，**只监听 127.0.0.1**（明文库不对外），写接口做同源 Origin 校验防 CSRF。
 
 ## 端侧嵌入服务（零外网语义档）
 
@@ -97,6 +97,9 @@ memlite inject --probe                # 看各软件 rules 注入点现状
 memlite inject --print                # 只打印块文本（手动粘进任意文件），不写盘
 memlite inject --all                  # 注入（正文取 Qoder rules 全文；冲突自动跳过，--force 强注）
 memlite bench [--semantic]            # 检索命中率评测（临时库，报 hit@1/hit@3）
+memlite querylog                      # 检索日志汇总：次数、档位、零命中、高命中 top
+memlite querylog --recent 20          # 最近 20 条查询流水
+memlite querylog --export train.jsonl # 导出训练集（每行一次查询：query/positive/hits）
 ```
 
 标题规则（影响检索命中率，实测见下）：`--title` 必须写事实句——主语＋动作＋关键实体或结果；禁只写主题分类名。缺省则截正文首句 ≤40 字。
@@ -105,13 +108,27 @@ memlite bench [--semantic]            # 检索命中率评测（临时库，报 
 
 词面档 20 条真实形态记忆 × 20 改写型查询：**hit@1 85%、hit@3 85%**；语义档 **hit@1 85%、hit@3 90%**。漏检全部是查询与正文零词面重合的纯改写——这正是语义档的适用场景；重跑 `memlite bench` / `memlite bench --semantic` 对比。
 
+## 检索日志（query_log，训练/复盘取材）
+
+每次 `recall`（CLI）与 Web 检索落一行进 `memory.querylog.jsonl`，含零命中与回退：
+
+```json
+{"ts":1792078629.79,"query":"检索日志怎么导出","backend":"semantic","limit":10,"fallback":"","source":"cli","ms":17,"hits":[{"id":"6f557054ce71","score":0.657,"title":"…"}]}
+```
+
+- `backend` semantic/bm25，`fallback:"user"` 标项目级回退，`source` cli/web，`ms` 端到端耗时（含回退那次）。
+- 每条记忆的**被召回次数**（recall_count）不另设文件——全量聚合自日志，Web 详情页显示，`memlite querylog` 出高命中 top。
+- 导出训练集：`memlite querylog --export train.jsonl`（每行 `{ts,query,backend,limit,positive:[ids],hits:[{id,score,title}]}`，`--since <unix秒>` 截窗）。
+- 文件名过同步白名单 `memory*.jsonl`，随 `memlite sync` 走；`bench` 评测查询不入日志（避免污染训练材料）。
+
 ## 数据仓布局
 
 ```
 memlite-data/
-├── memory.jsonl      # 追加日志，一行一条（put/del）
-├── meta.json         # 预留
-└── .gitignore        # 凭据类一律排除
+├── memory.jsonl             # 追加日志，一行一条（put/del）
+├── memory.querylog.jsonl    # 检索日志，一行一次查询（recall/网页检索）
+├── meta.json                # 预留
+└── .gitignore               # 凭据类一律排除
 ```
 
 `.gitignore` 已排除 `.env`、`*.token`、`session*`、`secret*`、`*.key`、`.git-credentials`。同步只 add 白名单文件，从不 `git add -A`。
