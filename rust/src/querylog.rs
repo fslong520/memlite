@@ -121,13 +121,14 @@ impl Log {
     pub fn stats(&self, top: usize) -> Value {
         let mut since = f64::MAX;
         let mut until = 0f64;
-        let (mut sem, mut bm, mut fb, mut cli, mut web) = (0u64, 0u64, 0u64, 0u64, 0u64);
+        let (mut sem, mut rrf, mut bm, mut fb, mut cli, mut web) = (0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
         let (mut hit_sum, mut zero) = (0u64, 0u64);
         for e in &self.entries {
             since = since.min(e.ts);
             until = until.max(e.ts);
             match e.backend.as_str() {
                 "semantic" => sem += 1,
+                "rrf" => rrf += 1,
                 _ => bm += 1,
             }
             if !e.fallback.is_empty() {
@@ -170,7 +171,7 @@ impl Log {
             "bad_lines": self.bad_lines,
             "since": if n > 0 { since } else { 0.0 },
             "until": until,
-            "backend": {"semantic": sem, "bm25": bm},
+            "backend": {"semantic": sem, "rrf": rrf, "bm25": bm},
             "fallback_user": fb,
             "source": {"cli": cli, "web": web},
             "hits_avg": if n > 0 { (hit_sum as f64 / n as f64 * 100.0).round() / 100.0 } else { 0.0 },

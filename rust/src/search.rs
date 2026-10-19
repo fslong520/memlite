@@ -159,6 +159,24 @@ pub fn semantic<'a, F: FnMut(&str) -> Option<Vec<f32>>>(
     scored
 }
 
+/// RRF 融合（k=60）：各候选列表按位次累加 1/(k+位次+1)，只看位次不吃量纲——
+/// 语义余弦与 BM25 分数可直接合。同分按 ts 新者先（与单档排序同口径）。
+pub fn rrf_fuse<'a>(lists: &[Vec<(f64, &'a Record)>], limit: usize) -> Vec<(f64, &'a Record)> {
+    const K: f64 = 60.0;
+    let mut fused: HashMap<&'a str, (f64, &'a Record)> = HashMap::new();
+    for list in lists {
+        for (rank, item) in list.iter().enumerate() {
+            let rec = item.1;
+            let slot = fused.entry(rec.id.as_str()).or_insert((0.0, rec));
+            slot.0 += 1.0 / (K + rank as f64 + 1.0);
+        }
+    }
+    let mut out: Vec<(f64, &'a Record)> = fused.into_values().collect();
+    out.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap().then(b.1.ts.partial_cmp(&a.1.ts).unwrap()));
+    out.truncate(limit);
+    out
+}
+
 /// 标题铁律：缺省截正文首句 ≤40 字
 pub fn default_title(content: &str) -> String {
     let head = content.lines().next().unwrap_or("");
@@ -244,6 +262,25 @@ mod tests {
         assert_eq!(cosine(&[1.0, 0.0], &[1.0, 0.0]), 1.0);
         assert_eq!(cosine(&[1.0], &[1.0, 2.0]), 0.0);
         assert_eq!(cosine(&[], &[1.0]), 0.0);
+    }
+
+    #[test]
+    fn rrf_fuse_dedup_and_both_lists_win() {
+        let a = rec("a", 1.0, "甲", "");
+        let b = rec("b", 2.0, "乙", "");
+        let c = rec("c", 3.0, "丙", "");
+        // a 两路命中（1/61+1/62）居首，b 词面第 1（1/61）胜 c 语义第 2（1/62）
+        let sem: Vec<(f64, &Record)> = vec![(0.9, &a), (0.8, &c)];
+        let kw: Vec<(f64, &Record)> = vec![(5.0, &b), (4.0, &a)];
+        let fused = rrf_fuse(&[sem, kw], 10);
+        assert_eq!(fused.len(), 3); // 同 id 合并不重复
+        assert_eq!(fused[0].1.id, "a");
+        assert!(fused[0].0 > fused[1].0 && fused[1].0 > fused[2].0);
+        // b(1/61) 应胜 c(1/62)
+        assert_eq!(fused[1].1.id, "b");
+        assert_eq!(fused[2].1.id, "c");
+        // limit 截断生效
+        assert_eq!(rrf_fuse(&[vec![(0.9, &a), (0.8, &b), (0.7, &c)]], 2).len(), 2);
     }
 
     #[test]

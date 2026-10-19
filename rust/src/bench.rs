@@ -90,9 +90,9 @@ fn bench_into(dir: &Path, cfg: Option<&embed::EmbedConfig>, json: bool) -> i32 {
     let mut misses: Vec<&str> = vec![];
     let mut bm25_fallback = 0usize;
     for (i, (_, _, query)) in CORPUS.iter().enumerate() {
-        // 复用产品检索路径：语义档无命中自动词面兜底（backend 如实计数）
+        // 复用产品检索路径：配 API 为 rrf 融合，仅语义不可用回落 bm25（如实计数）
         let (backend, hits) = recall_search(dir, query, 3, "", !semantic);
-        if backend != "semantic" {
+        if backend == "bm25" {
             bm25_fallback += 1;
         }
         let top: Vec<&str> = hits.iter().map(|(_, r)| r.id.as_str()).collect();

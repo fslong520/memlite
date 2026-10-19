@@ -233,6 +233,7 @@ fn fmt_ts(ts: f64) -> String {
 
 /// 单库检索：语义档优先（API 在配且通），失败或空回词面 BM25。
 /// 返回 (backend, hits)。两档回退的上层逻辑见 recall 命令（web 同复用）。
+/// 配了嵌入且语义有命中 → rrf 融合（语义+词面双臂按位次合成）；语义不可用/无命中 → bm25。
 pub(crate) fn recall_search(
     dir: &Path,
     query: &str,
@@ -242,29 +243,37 @@ pub(crate) fn recall_search(
 ) -> (&'static str, Vec<(f64, store::Record)>) {
     let s = Store::open(dir);
     let recs = s.all();
-    let mut backend: &'static str = "bm25";
-    let mut hits: Vec<(f64, store::Record)> = vec![];
-    if !bm25_only {
-        if let Some(cfg) = embed::embedding_config() {
-            if let Ok(qv) = embed::embed(&cfg, query) {
-                let mut vidx = vectors::VectorIndex::open(dir);
-                let mut getter = |id: &str| vidx.get(id);
-                hits = search::semantic(&recs, &qv, limit, project, &mut getter)
+    // 词面臂全程必算：融合时是其中一臂，否则是兜底；取池深于 limit 供融合摊位次
+    let pool = (limit * 10).max(50);
+    let bm = search::bm25(&recs, query, pool, project);
+    if bm25_only {
+        let hits: Vec<(f64, store::Record)> = bm
+            .into_iter()
+            .take(limit)
+            .map(|(sc, r)| (sc, r.clone()))
+            .collect();
+        return ("bm25", hits);
+    }
+    if let Some(cfg) = embed::embedding_config() {
+        if let Ok(qv) = embed::embed(&cfg, query) {
+            let mut vidx = vectors::VectorIndex::open(dir);
+            let mut getter = |id: &str| vidx.get(id);
+            let sem = search::semantic(&recs, &qv, pool, project, &mut getter);
+            if !sem.is_empty() {
+                let fused: Vec<(f64, store::Record)> = search::rrf_fuse(&[sem, bm], limit)
                     .into_iter()
                     .map(|(sc, r)| (sc, r.clone()))
                     .collect();
-                backend = "semantic";
+                return ("rrf", fused);
             }
         }
     }
-    if backend != "semantic" || hits.is_empty() {
-        backend = "bm25";
-        hits = search::bm25(&recs, query, limit, project)
-            .into_iter()
-            .map(|(sc, r)| (sc, r.clone()))
-            .collect();
-    }
-    (backend, hits)
+    let hits: Vec<(f64, store::Record)> = bm
+        .into_iter()
+        .take(limit)
+        .map(|(sc, r)| (sc, r.clone()))
+        .collect();
+    ("bm25", hits)
 }
 
 fn main() {
@@ -603,8 +612,8 @@ fn run(cli: Cli, dir: &PathBuf) -> i32 {
             );
             if st["queries_window"].as_u64().unwrap_or(0) > 0 {
                 println!(
-                    "  档位 semantic {} · bm25 {}　来源 cli {} · web {}　回退用户级 {}",
-                    b["semantic"], b["bm25"], s["cli"], s["web"], st["fallback_user"]
+                    "  档位 semantic {} · rrf 融合 {} · bm25 {}　来源 cli {} · web {}　回退用户级 {}",
+                    b["semantic"], b["rrf"], b["bm25"], s["cli"], s["web"], st["fallback_user"]
                 );
                 println!(
                     "  命中 平均 {} 条/次 · 零命中 {} 次 · 被召回过的记忆 {} 条",

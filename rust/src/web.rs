@@ -910,7 +910,7 @@ function drawHits(){
   else if(!SR.hits.length)body=`<div class="empty"><strong>没有命中</strong><div class="muted">换 2–3 组词再试（零词面重合的改写靠语义档）</div></div>`;
   else{
     const meta=`<div class="se-meta"><span class="badge accent"><i class="dot"></i>命中 ${SR.hits.length}</span>
-      <span class="badge">${SR.backend==='semantic'?'语义':'词面'}</span>
+      <span class="badge">${SR.backend==='semantic'?'语义':SR.backend==='rrf'?'融合':'词面'}</span>
       <span class="badge">上限 ${SR.limit}</span>
       ${SR.fallback?'<span class="badge warn"><i class="dot"></i>项目级无命中已回退用户级</span>':''}</div>`;
     const rows=SR.hits.map(h=>`<button class="se-hit ${h.id===SR.sel?'on':''}" data-id="${esc(h.id)}" title="${esc(h.title)}">
@@ -1172,7 +1172,7 @@ async function renderQuerylog(){
         d.recent.map(r=>`<tr><td class="mono">${dt(r.ts)}</td>
           <td><button class="btn sm ghost" data-rq="${esc(r.query)}" style="padding:2px 6px">${esc(r.query)}</button>
             ${r.fallback?'<span class="badge warn" style="margin-left:6px"><i class="dot"></i>回退</span>':''}</td>
-          <td><span class="badge ${r.backend==='semantic'?'accent':''}">${r.backend==='semantic'?'语义':'词面'}</span></td>
+          <td><span class="badge ${r.backend==='semantic'||r.backend==='rrf'?'accent':''}">${r.backend==='semantic'?'语义':r.backend==='rrf'?'融合':'词面'}</span></td>
           <td class="muted">${esc(r.source)}</td><td class="mono">${r.hits.length}</td><td class="mono">${r.ms}ms</td></tr>`).join('')
       }</tbody></table>`:'<div class="empty"><strong>还没有检索日志</strong><div class="muted">跑一次 recall 或网页检索即开始累积</div></div>';
       $('qlRecent').querySelectorAll('[data-rq]').forEach(b=>b.onclick=()=>{go('memory','search');
