@@ -115,21 +115,7 @@ fn rules_text_from(source: &Path, lite: bool) -> Result<String, String> {
 
 /// 独立系统级 rules 文件全文（emit 用；整文件语义，无块标记、不含本机路径）
 pub fn standalone_text() -> String {
-    "# memlite 记忆工作流\n\n\
-本机记忆库由 memlite 管理（明文 JSONL，GitHub 私有仓同步）。CLI：`memlite <命令>`。\n\n\
-总纲：**凡开口先查，凡动手必查，凡所得可录，凡碰壁翻忆。**\n\n\
-## 铁锚 · 三行\n\n\
-1. **答前必查**：`memlite recall \"项目名+关键词\"`——未翻忆不开答。项目级库优先（工作区含 config.json 的 `.memlite/`），没搜到 CLI 自动回退用户级。\n\
-2. **收尾必存**：新事实/决策/教训 `memlite remember \"内容\" --title \"事实句\"`——未落库不算完。\n\
-3. **遇障先翻忆**：报错、异常先 `memlite recall \"报错原文片段\"` 再动手——未查不动手、不试错。\n\n\
-## 流程\n\n\
-1. **开口先查**：`memlite recall \"<项目名+核心词>\"`（缺省 top10；`--json` 结构化）。两档皆空换 2–3 组词再查。\n\
-2. **所得必存**：先 recall 判重 → `memlite show <id>` 读候选 → 改＞并＞存：旧条更新走 `memlite update <id> --content/--title`（未传字段保留原值）；同题散条合成综合版后 forget 旧条；两轮换词皆空才新存。一事一条。\n\
-3. **标题铁律**：`--title` 必须是事实句（主语＋动作＋关键实体或结果），禁只写主题分类名。\n\
-4. **敏感闸**：口令/证件号/手机号/银行卡/token/私钥禁入正文与查询词，只写存放位置（如「密码在 ~/.env」）——CLI 写前自动扫描，命中即拒。\n\
-5. **同步**：`memlite sync` 只 add 白名单数据文件，push 后双通道核验 sha；数据仓须为 private 仓库。\n\
-6. **管理台**：`memlite web --port 7879` 起本地回环管理页（语义检索/增删改/时间线/标签/版本历史/注入）。\n"
-        .to_string()
+    "# memlite 记忆工作流\n\n本机记忆库由 memlite 管理（明文 JSONL，GitHub 私有仓同步）。CLI：`memlite <命令>`。\n\n总纲：**凡开口先查，凡动手必查，凡所得可录，凡碰壁翻忆。**\n\n## 铁锚 · 三行\n\n1. **答前必查**：`memlite recall \"项目名+关键词\"`——未翻忆不开答。项目级库优先（工作区含 config.json 的 `.memlite/`），没搜到 CLI 自动回退用户级。\n2. **收尾必存即推**：新事实/决策/教训 `memlite remember \"内容\" --title \"事实句\"` 落库后紧接 `memlite sync`——未推上远端不算完。\n3. **遇障先翻忆**：报错、异常先 `memlite recall \"报错原文片段\"` 再动手——未查不动手、不试错。\n\n## 流程\n\n1. **开口先查**：`memlite recall \"<项目名+核心词>\"`（缺省 top10；`--json` 结构化）。两档皆空换 2–3 组词再查。\n2. **所得必存**：先 recall 判重 → `memlite show <id>` 读候选 → 改＞并＞存：旧条更新走 `memlite update <id> --content/--title`（未传字段保留原值）；同题散条合成综合版后 forget 旧条；两轮换词皆空才新存。一事一条。\n3. **标题铁律**：`--title` 必须是事实句（主语＋动作＋关键实体或结果），禁只写主题分类名。\n4. **敏感闸**：口令/证件号/手机号/银行卡/token/私钥禁入正文与查询词，只写存放位置（如「密码在 ~/.env」）——CLI 写前自动扫描，命中即拒。\n5. **同步（存后即跑）**：`remember`/`forget`/`update` 落库后紧接 `memlite sync`，收尾再跑一次；数据仓须为 private 仓库。sync 内置白名单 add（`memory*.jsonl`／`meta.json`／`README.md`，禁 `git add -A`）→ commit → pull --rebase → push → 双通道核验 local/remote sha，回执须 `verified:true` 方算同步。失败分诊：**瞬时错**（index.lock、并发 git 互踩、push 超时）隔 30s 重试——sync 先 commit 后推，失败不丢数据；**真冲突**（rebase 残留 `UU`＋HEAD 游离，另台设备推过同区内容）走并集三步，任一不过即停手、禁 force 禁 drop——① `git merge-base` 取共同基底，验两侧对基底只增不删不改；② 两侧新增行 id 零交集（同 id 双改须人工裁决）；③ 过①②写并集（上游侧全量＋本地侧不重复行）→ `git add` → `GIT_EDITOR=true git rebase --continue` → 重跑 sync 取 `verified:true`，终验两侧新增 id 全在、无 `<<<<<<<` 标记残留。`memory.querylog.jsonl` 无 id 键，冲突按行并集去重即可。\n6. **管理台**：`memlite web --port 7879` 起本地回环管理页（语义检索/增删改/时间线/标签/版本历史/注入）。\n\n## 因果树梳理（判官是你）\n\nmemlite 不调模型判挂——读本规则的你自任判官，CLI 只给原语：\n\n- **认因入库**：新条上游已定 → `remember --parent <纲名/id>` 显式挂载；拿不准先裸存，留待梳理。\n- **散记归树**：`tree --outline`（只出 id+标题全深目录，梳理先读此）→ 判该挂哪纲 → `attach <子> --parent <父>`。\n- **错挂纠正**：升层 `promote`（挂到祖父/根）、下沉 `demote <子> --parent <父>`。改挂已防自挂防环，违规即拒。\n- **深挖因果**：见因链名要全文 → `chain <id> [--depth N]` 一把取回整条链，别逐层 show。\n- **查树形**：`tree [--from <id>] [--depth N]` 看森林或子树。梳理一轮收尾 sync。\n".to_string()
 }
 
 pub fn check_state(path: &Path) -> &'static str {

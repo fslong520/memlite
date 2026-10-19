@@ -87,10 +87,16 @@ memlite config show        # 合并视图（api_key 脱敏）
 ```bash
 memlite init                          # 初始化数据仓与配置
 memlite remember "内容" --title "事实句标题"
+memlite remember "内容" --parent <父id/纲名>   # 认因挂载：父子即因果（显式挂载不判存）
 memlite recall "查询"                 # 自动选档；--bm25 强制词面
 memlite reembed                       # 给旧记忆回填向量（配了 API）
 memlite show <id> / list / forget <id>
-memlite update <id> --title "新标题" --content "改后正文"   # 就地改，未传字段保留
+memlite update <id> --title "新标题" --content "改后正文"   # 就地改，未传字段保留（因链随迁）
+memlite attach <子> --parent <父>     # 收编挂链（id/前8位/纲名皆可，防环防自挂）
+memlite demote <子> --parent <父>     # 因果下沉：挂到父下成为其果（同 attach，下游果链随迁）
+memlite promote <子>                  # 因果上浮：升为更上游之因（挂到祖父/根，果链随之）
+memlite chain <id> [--depth N]        # 因果链深挖：因链全文（根在前）+ 本条 + 果链下探 N 层
+memlite tree [--from <id>] [--depth N] [--outline]   # 因果树：森林/子树；--outline 全深目录
 memlite sync                          # git 同步（白名单 add + sha 双通道核验）
 memlite status
 memlite inject --probe                # 看各软件 rules 注入点现状
@@ -103,6 +109,19 @@ memlite querylog --export train.jsonl # 导出训练集（每行一次查询：q
 ```
 
 标题规则（影响检索命中率，实测见下）：`--title` 必须写事实句——主语＋动作＋关键实体或结果；禁只写主题分类名。缺省则截正文首句 ≤40 字。
+
+## 因果树与因果链（对齐 respire）
+
+父=因、子=果，`parent_id` 随条入库（老数据迁移保留）。`recall`/`show` 命中即见前因后果：🔺因链标题链 → ▸纲L1 父内容头 → 🔻果（子条摘要＋孙标题）。数据语义同 respire——琐事（`trivial`）出树、父失效（琐事/已删）者提为根，不产悬空。
+
+```bash
+memlite chain 8744409e --depth 2    # 一把取回整条链，免逐层 show
+memlite tree --depth 3               # 全部根森林（├─ 树形，含 kind 与叶标记）
+memlite tree --from 8744409e         # 从某节点看子树
+memlite tree --outline               # 全深 id+标题目录（AI 梳理先读此）
+```
+
+改挂防环：`attach`/`demote` 拒自挂、拒挂自己后代（新父因链含本条即拦）；`promote` 升根果链随迁。所有命令带 `--json` 结构化输出。Web 侧「记忆 · 因果树」页签可下钻，详情页显示🔺因链/🔻果并可点击跳转。
 
 ## 检索命中率（memlite bench）
 

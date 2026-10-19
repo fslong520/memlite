@@ -27,6 +27,23 @@ pub struct Record {
     pub extra: HashMap<String, Value>,
 }
 
+impl Record {
+    /// 因果树父指针：extra.parent_id（迁移库带此字段；无则空串=根）。
+    pub fn parent_id(&self) -> &str {
+        self.extra.get("parent_id").and_then(|v| v.as_str()).unwrap_or("")
+    }
+
+    /// 重要性（respire 迁移数据 important/trivial；新条可缺省）。
+    pub fn importance(&self) -> &str {
+        self.extra.get("importance").and_then(|v| v.as_str()).unwrap_or("")
+    }
+
+    /// 记忆形态（Context/Task/Skill/...；迁移库带，新条可缺省）。
+    pub fn kind(&self) -> &str {
+        self.extra.get("kind").and_then(|v| v.as_str()).unwrap_or("")
+    }
+}
+
 pub struct Store {
     pub data_dir: PathBuf,
     pub records: HashMap<String, Record>,
@@ -148,10 +165,27 @@ impl Store {
     }
 
     pub fn put(&mut self, content: &str, title: &str, tags: &[String], project: &str) -> Result<String, String> {
+        self.put_child(content, title, tags, project, "")
+    }
+
+    /// 存一条并显式认因（parent 非空须已在库——不产生悬空父指针；空串=根）。
+    pub fn put_child(
+        &mut self,
+        content: &str,
+        title: &str,
+        tags: &[String],
+        project: &str,
+        parent: &str,
+    ) -> Result<String, String> {
         if content.trim().is_empty() {
             return Err("content 为空".into());
         }
+        if !parent.is_empty() && !self.records.contains_key(parent) {
+            return Err(format!("目标因（父）不存在: {parent}"));
+        }
         let rid = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
+        let mut extra = HashMap::new();
+        extra.insert("parent_id".to_string(), Value::String(parent.to_string()));
         let rec = Record {
             op: "put".into(),
             id: rid.clone(),
@@ -160,7 +194,7 @@ impl Store {
             content: content.trim().into(),
             tags: tags.iter().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect(),
             project: project.trim().into(),
-            extra: HashMap::new(),
+            extra,
         };
         self.append(&rec).map_err(|e| e.to_string())?;
         self.apply(rec);
@@ -186,7 +220,8 @@ impl Store {
         Ok(())
     }
 
-    /// 就地改：同 id 追加新 put（末写胜出，id 不变）
+    /// 就地改：同 id 追加新 put（末写胜出，id 不变）。
+    /// extra 全量保留（parent_id/importance/kind 随迁——改前文不能丢因链，2026-10-16 修）。
     pub fn put_with_id(
         &mut self,
         rid: &str,
@@ -198,6 +233,11 @@ impl Store {
         if content.trim().is_empty() {
             return Err("content 为空".into());
         }
+        let extra = self
+            .records
+            .get(rid)
+            .map(|r| r.extra.clone())
+            .unwrap_or_default();
         let rec = Record {
             op: "put".into(),
             id: rid.to_string(),
@@ -206,11 +246,77 @@ impl Store {
             content: content.trim().into(),
             tags: tags.iter().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect(),
             project: project.trim().into(),
-            extra: HashMap::new(),
+            extra,
         };
         self.append(&rec).map_err(|e| e.to_string())?;
         self.apply(rec);
         Ok(())
+    }
+
+    /// 改挂因（新父）：追加同 id 新 put，仅换 parent_id（空串=升根）。
+    /// 防环由调用方查证（reparent_checked）；本函数只保证两节点存在。
+    pub fn reparent(&mut self, rid: &str, new_parent: &str) -> Result<(), String> {
+        let Some(old) = self.records.get(rid).cloned() else {
+            return Err(format!("记忆不存在: {rid}"));
+        };
+        if !new_parent.is_empty() && !self.records.contains_key(new_parent) {
+            return Err(format!("目标因（父）不存在: {new_parent}"));
+        }
+        let mut rec = old;
+        rec.extra.insert("parent_id".to_string(), Value::String(new_parent.to_string()));
+        // ts 保留原值：改挂是结构调整，不该把老条顶进 list「最近」时间线
+        self.append(&rec).map_err(|e| e.to_string())?;
+        self.apply(rec);
+        Ok(())
+    }
+
+    /// 改挂带防环：新父不得为本条、也不得在本条因链上（即新父是本条后代）。
+    pub fn reparent_checked(&mut self, rid: &str, new_parent: &str) -> Result<(), String> {
+        if rid == new_parent {
+            return Err("不能挂自己".into());
+        }
+        if !new_parent.is_empty() {
+            for anc in self.ancestor_chain(new_parent) {
+                if anc == rid {
+                    return Err("防环：新父是本条的后代".into());
+                }
+            }
+        }
+        self.reparent(rid, new_parent)
+    }
+
+    /// 因链回溯（父→祖父→…），返回**自根至父**顺序（不含本条）。
+    /// 防环封顶 64 层（脏数据不挂死）；父不在库即断链止步。
+    pub fn ancestor_chain(&self, rid: &str) -> Vec<String> {
+        let mut chain = Vec::new();
+        let mut cur = rid.to_string();
+        for _ in 0..64 {
+            let Some(pid) = self.records.get(&cur).map(|r| r.parent_id().to_string()) else {
+                break;
+            };
+            if pid.is_empty() {
+                break;
+            }
+            chain.push(pid.clone());
+            cur = pid;
+        }
+        chain.reverse();
+        chain
+    }
+
+    /// 直接子条（果），按 ts 升序（存入序，树渲染稳定）。
+    pub fn children(&self, rid: &str) -> Vec<&Record> {
+        let mut v: Vec<&Record> = self.records.values().filter(|r| r.parent_id() == rid).collect();
+        v.sort_by(|a, b| a.ts.partial_cmp(&b.ts).unwrap_or(std::cmp::Ordering::Equal));
+        v
+    }
+
+    /// 根集：parent_id 为空（含老数据无此字段）。
+    #[allow(dead_code)] // bin 主流程走 TreeScope.roots；测试用
+    pub fn roots(&self) -> Vec<&Record> {
+        let mut v: Vec<&Record> = self.records.values().filter(|r| r.parent_id().is_empty()).collect();
+        v.sort_by(|a, b| a.ts.partial_cmp(&b.ts).unwrap_or(std::cmp::Ordering::Equal));
+        v
     }
 
     pub fn count(&self) -> usize {
@@ -226,10 +332,18 @@ impl Store {
         self.records.get(rid)
     }
 
-    /// 短 id 前缀解析
+    /// id / 纲名（精确标题唯一命中）/ 前缀 三级解析——与 respire resolve_prefix 同序。
     pub fn resolve(&self, prefix: &str) -> Option<&Record> {
+        let prefix = prefix.trim_start_matches('#');
         if let Some(r) = self.records.get(prefix) {
             return Some(r);
+        }
+        // 纲名直挂：精确标题唯一命中即取（词库纲名即挂载名）
+        let mut by_title = self.records.values().filter(|r| r.title == prefix);
+        if let Some(hit) = by_title.next() {
+            if by_title.next().is_none() {
+                return Some(hit);
+            }
         }
         let mut it = self.records.values().filter(|r| r.id.starts_with(prefix));
         let hit = it.next();
@@ -446,6 +560,102 @@ mod tests {
         let rid = s.put("x", "", &[], "").unwrap();
         assert!(s.resolve(&rid[..6]).is_some());
         assert!(s.resolve("zzzz").is_none());
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn resolve_by_exact_title_unique() {
+        let d = tmp();
+        let mut s = Store::open(&d);
+        let rid = s.put("x", "编程开发", &[], "").unwrap();
+        assert_eq!(s.resolve("编程开发").unwrap().id, rid);
+        // 重复标题不取（歧义回落前缀路）
+        s.put("y", "编程开发", &[], "").unwrap();
+        assert!(s.resolve("编程开发").is_none());
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn put_child_requires_existing_parent() {
+        let d = tmp();
+        let mut s = Store::open(&d);
+        assert!(s.put_child("c", "", &[], "", "nope").is_err());
+        let pid = s.put_child("p", "父", &[], "", "").unwrap();
+        let cid = s.put_child("c", "子", &[], "", &pid).unwrap();
+        assert_eq!(s.get(&cid).unwrap().parent_id(), pid);
+        assert_eq!(s.ancestor_chain(&cid), vec![pid.clone()]);
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn reparent_checked_blocks_cycle_and_self() {
+        let d = tmp();
+        let mut s = Store::open(&d);
+        let a = s.put_child("a", "甲", &[], "", "").unwrap();
+        let b = s.put_child("b", "乙", &[], "", &a).unwrap();
+        let c = s.put_child("c", "丙", &[], "", &b).unwrap();
+        // 自挂
+        assert!(s.reparent_checked(&a, &a).is_err());
+        // 挂后代成环（a 挂到 c 下 → c 是 a 后代）
+        assert!(s.reparent_checked(&a, &c).is_err());
+        // 合法改挂：c 升到 a 下
+        s.reparent_checked(&c, &a).unwrap();
+        assert_eq!(s.ancestor_chain(&c), vec![a.clone()]);
+        // 升根
+        s.reparent_checked(&b, "").unwrap();
+        assert!(s.ancestor_chain(&b).is_empty());
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn update_put_with_id_preserves_parent_and_meta() {
+        let d = tmp();
+        let mut s = Store::open(&d);
+        let pid = s.put_child("p", "父", &[], "", "").unwrap();
+        let cid = s.put_child("c", "子", &[], "", &pid).unwrap();
+        // 直写一行带 importance/kind 的 put（模拟迁移库字段），再走 update
+        let line = format!(
+            r#"{{"op":"put","id":"{cid}","ts":2.0,"title":"子","content":"c","tags":[],"project":"","parent_id":"{pid}","importance":"important","kind":"Task"}}"#
+        );
+        use std::io::Write;
+        let mut f = fs::OpenOptions::new().append(true).open(d.join(DATA_FILE)).unwrap();
+        writeln!(f, "{line}").unwrap();
+        drop(f);
+        // 重开装载手写行（内存索引不会自发重载），再走 update
+        let mut s = Store::open(&d);
+        s.put_with_id(&cid, "改后正文", "改题", &["t".into()], "").unwrap();
+        let after = s.get(&cid).unwrap();
+        assert_eq!(after.parent_id(), pid, "update 后 parent_id 丢失");
+        assert_eq!(after.importance(), "important", "update 后 importance 丢失");
+        assert_eq!(after.kind(), "Task", "update 后 kind 丢失");
+        assert_eq!(after.content, "改后正文");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn children_sorted_by_ts_roots_excluded() {
+        let d = tmp();
+        let mut s = Store::open(&d);
+        let p = s.put_child("p", "父", &[], "", "").unwrap();
+        let k1 = s.put_child("k1", "", &[], "", &p).unwrap();
+        let k2 = s.put_child("k2", "", &[], "", &p).unwrap();
+        let kids: Vec<String> = s.children(&p).iter().map(|r| r.id.clone()).collect();
+        assert_eq!(kids, vec![k1.clone(), k2.clone()]);
+        assert_eq!(s.roots().len(), 1);
+        assert_eq!(s.children("").len(), 1); // 空父=根集
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn ancestor_chain_survives_dirty_cycle_data() {
+        // 脏数据造环（绕过 reparent_checked 直写文件），chain 封顶不挂死
+        let d = tmp();
+        let mut s = Store::open(&d);
+        let a = s.put_child("a", "", &[], "", "").unwrap();
+        let b = s.put_child("b", "", &[], "", &a).unwrap();
+        let _ = s.reparent(&a, &b); // 故意造环：a→b→a
+        let chain = Store::open(&d).ancestor_chain(&a);
+        assert!(chain.len() <= 64, "chain 封顶 64 层，实得 {}", chain.len());
         std::fs::remove_dir_all(&d).ok();
     }
 }

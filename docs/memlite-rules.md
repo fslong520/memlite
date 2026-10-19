@@ -18,3 +18,13 @@
 4. **敏感闸**：口令/证件号/手机号/银行卡/token/私钥禁入正文与查询词，只写存放位置（如「密码在 ~/.env」）——CLI 写前自动扫描，命中即拒。
 5. **同步（存后即跑）**：`remember`/`forget`/`update` 落库后紧接 `memlite sync`，收尾再跑一次；数据仓须为 private 仓库。sync 内置白名单 add（`memory*.jsonl`／`meta.json`／`README.md`，禁 `git add -A`）→ commit → pull --rebase → push → 双通道核验 local/remote sha，回执须 `verified:true` 方算同步。失败分诊：**瞬时错**（index.lock、并发 git 互踩、push 超时）隔 30s 重试——sync 先 commit 后推，失败不丢数据；**真冲突**（rebase 残留 `UU`＋HEAD 游离，另台设备推过同区内容）走并集三步，任一不过即停手、禁 force 禁 drop——① `git merge-base` 取共同基底，验两侧对基底只增不删不改；② 两侧新增行 id 零交集（同 id 双改须人工裁决）；③ 过①②写并集（上游侧全量＋本地侧不重复行）→ `git add` → `GIT_EDITOR=true git rebase --continue` → 重跑 sync 取 `verified:true`，终验两侧新增 id 全在、无 `<<<<<<<` 标记残留。`memory.querylog.jsonl` 无 id 键，冲突按行并集去重即可。
 6. **管理台**：`memlite web --port 7879` 起本地回环管理页（语义检索/增删改/时间线/标签/版本历史/注入）。
+
+## 因果树梳理（判官是你）
+
+memlite 不调模型判挂——读本规则的你自任判官，CLI 只给原语：
+
+- **认因入库**：新条上游已定 → `remember --parent <纲名/id>` 显式挂载；拿不准先裸存，留待梳理。
+- **散记归树**：`tree --outline`（只出 id+标题全深目录，梳理先读此）→ 判该挂哪纲 → `attach <子> --parent <父>`。
+- **错挂纠正**：升层 `promote`（挂到祖父/根）、下沉 `demote <子> --parent <父>`。改挂已防自挂防环，违规即拒。
+- **深挖因果**：见因链名要全文 → `chain <id> [--depth N]` 一把取回整条链，别逐层 show。
+- **查树形**：`tree [--from <id>] [--depth N]` 看森林或子树。梳理一轮收尾 sync。

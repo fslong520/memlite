@@ -4,7 +4,8 @@
 //! 只绑 127.0.0.1（明文记忆库，绝不监听外网）。API：
 //!   GET  /api/status      → 库状态（data_dir/条数/文件/嵌入配置）
 //!   GET  /api/search?q=   → 检索（复用 CLI 的两档自动回退逻辑）
-//!   GET  /api/show?id=    → 单条全文
+//!   GET  /api/show?id=    → 单条全文（含 ancestors/children 因果邻居）
+//!   GET  /api/tree?from=   → 因果树嵌套森林 JSON（trivial 出树、父失效提根）
 //!   POST /api/remember    → 存（走敏感闸）
 //!   POST /api/forget      → 删
 //!   POST /api/sync        → git 同步
@@ -104,6 +105,10 @@ fn handle(
             let id = url_param(&path, "id").unwrap_or_default();
             api_show(data_dir, log, &id, &mut stream)
         }
+        ("GET", "/api/tree") => {
+            let from = url_param(&path, "from").unwrap_or_default();
+            api_tree(data_dir, &from, &mut stream)
+        }
         ("GET", "/api/list") => {
             let limit: usize = url_param(&path, "limit").and_then(|v| v.parse().ok()).unwrap_or(30);
             let offset: usize = url_param(&path, "offset").and_then(|v| v.parse().ok()).unwrap_or(0);
@@ -168,6 +173,11 @@ fn percent_decode(s: &str) -> String {
         }
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// id 取前 8 位（人读，与 CLI short() 一致）
+fn short(id: &str) -> &str {
+    &id[..id.len().min(8)]
 }
 
 fn resp(stream: &mut TcpStream, code: u16, json: &str) -> Result<(), String> {
@@ -290,11 +300,67 @@ fn api_show(
     match s.resolve(id) {
         Some(r) => {
             let count = log.lock().map(|l| l.count_of(&r.id)).unwrap_or(0);
+            let rid = r.id.clone();
             let mut v = serde_json::to_value(r).unwrap();
             v["recall_count"] = serde_json::json!(count);
+            // 因果邻居（对齐 CLI show --json）：因链 id+标题、子条 id+标题+摘要
+            let title_of = |pid: &str| -> String {
+                s.records
+                    .get(pid)
+                    .map(|p| if p.title.is_empty() { short(pid).to_string() } else { p.title.clone() })
+                    .unwrap_or_else(|| short(pid).to_string())
+            };
+            let ancestors: Vec<serde_json::Value> = s
+                .ancestor_chain(&rid)
+                .into_iter()
+                .filter(|pid| s.records.contains_key(pid))
+                .map(|pid| serde_json::json!({"id": pid, "title": title_of(&pid)}))
+                .collect();
+            let children: Vec<serde_json::Value> = s
+                .children(&rid)
+                .iter()
+                .map(|c| {
+                    serde_json::json!({
+                        "id": c.id,
+                        "title": c.title,
+                        "summary": c.content.chars().take(80).collect::<String>(),
+                    })
+                })
+                .collect();
+            v["ancestors"] = serde_json::json!(ancestors);
+            v["children"] = serde_json::json!(children);
             resp(stream, 200, &serde_json::to_string(&v).unwrap())
         }
         None => resp(stream, 404, r#"{"error":"记忆不存在"}"#),
+    }
+}
+
+/// 因果树：返回作用域内嵌套森林 JSON（trivial 出树、父失效提根；对齐 CLI tree --json）
+fn api_tree(data_dir: &std::path::Path, from: &str, stream: &mut TcpStream) -> Result<(), String> {
+    let s = Store::open(data_dir);
+    let scope = crate::tree::TreeScope::build(&s);
+    // --from 支持 id/前8位/纲名（先全库解析再入作用域）
+    let from_full = if from.is_empty() {
+        None
+    } else {
+        match s.resolve(from) {
+            Some(r) => Some(r.id.clone()),
+            None => return resp(stream, 404, &format!(r#"{{"error":"记忆不存在: {from}"}}"#)),
+        }
+    };
+    fn to_json(n: &crate::tree::TreeNode) -> serde_json::Value {
+        serde_json::json!({
+            "id": n.id, "title": n.title, "kind": n.kind,
+            "level": n.level, "leaf": n.leaf,
+            "children": n.children.iter().map(to_json).collect::<Vec<_>>(),
+        })
+    }
+    match crate::tree::tree_json(&scope, from_full.as_deref()) {
+        Ok(nodes) => {
+            let arr: Vec<serde_json::Value> = nodes.iter().map(to_json).collect();
+            resp(stream, 200, &serde_json::to_string(&serde_json::json!({"nodes": arr})).unwrap())
+        }
+        Err(e) => resp(stream, 400, &serde_json::json!({"error": e}).to_string()),
     }
 }
 
@@ -759,7 +825,7 @@ const ICONS={
  runtime:'<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M1.8 8h2.6l1.8-4.4L8.9 12.4l1.7-4.4h2.6"/></svg>',
  settings:'<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><circle cx="8" cy="8" r="2.4"/><path d="M8 1.6v2M8 12.4v2M1.6 8h2M12.4 8h2M3.6 3.6l1.4 1.4M11 11l1.4 1.4M12.4 3.6 11 5M5 11l-1.4 1.4"/></svg>'};
 const GROUPS=[
- {key:'memory',label:'记忆',tabs:[['search','检索'],['timeline','时间线'],['tags','标签 · 项目']]},
+ {key:'memory',label:'记忆',tabs:[['search','检索'],['timeline','时间线'],['tree','因果树'],['tags','标签 · 项目']]},
  {key:'runtime',label:'运行',tabs:[['status','状态'],['inject','注入'],['sync','同步']]},
  {key:'settings',label:'设置',tabs:[['querylog','检索日志'],['maintain','维护'],['appearance','外观']]}];
 let G='memory',T='search';
@@ -774,7 +840,7 @@ function renderTabs(){
     <div class="tabbar">${grp.tabs.map(([k,l])=>`<button class="tab ${k===T?'active':''}" data-t="${k}">${esc(l)}</button>`).join('')}</div><div id="pane"></div></div>`;
   $('pageRoot').querySelectorAll('[data-t]').forEach(b=>b.onclick=()=>{T=b.dataset.t;renderShell()});
 }
-const PANES={search:renderSearch,timeline:renderTimeline,tags:renderTags,status:renderStatus,inject:renderInject,sync:renderSync,querylog:renderQuerylog,maintain:renderMaintain,appearance:renderAppearance};
+const PANES={search:renderSearch,timeline:renderTimeline,tree:renderTree,tags:renderTags,status:renderStatus,inject:renderInject,sync:renderSync,querylog:renderQuerylog,maintain:renderMaintain,appearance:renderAppearance};
 function renderShell(){renderNav();renderTabs();(PANES[T]||renderSearch)()}
 
 /* ── 顶栏状态 ── */
@@ -863,6 +929,18 @@ async function openDetail(id,keepHit){
     SR.detail=r;SR.sel=r.id;if(!keepHit)drawHits();drawDetail();
   }catch(e){p.innerHTML=`<div class="panel-head"><h2>详情</h2></div><div class="se-badbox">${esc(e.message)}</div>`}
 }
+/* 因果视界（对齐 CLI show 的 ancestors/children）：🔺因链标题链 + 🔻果（子条标题+摘要） */
+function causalHtml(r){
+  const anc=r.ancestors||[],ch=r.children||[];
+  if(!anc.length&&!ch.length)return '';
+  const link=id=>`<button class="btn sm ghost" data-causal="${esc(id)}">${esc(id.slice(0,8))}</button>`;
+  return `<div class="se-causal" style="margin-top:12px;padding:10px;border:1px solid var(--line);border-radius:8px">
+    ${anc.length?`<div style="margin-bottom:6px"><span class="badge">🔺因链</span> ${anc.map(a=>link(a.id)+' '+esc(a.title)).join(' ← ')}</div>`:''}
+    ${ch.length?`<div><span class="badge">🔻果 ${ch.length} 个</span><div class="rows">${ch.map(c=>`
+      <div class="row"><div class="row-main">${link(c.id)} <strong>${esc(c.title||'(无标题)')}</strong>
+        <span class="muted">${esc((c.summary||'').slice(0,60))}</span></div></div>`).join('')}</div></div>`:''}
+  </div>`;
+}
 function drawDetail(){
   const p=$('detailPanel');if(!p)return;
   const r=SR.detail;
@@ -878,6 +956,7 @@ function drawDetail(){
       ${(r.kind?`<span class="badge">${esc(r.kind)}</span>`:'')}
     </div>
     <div class="se-body">${esc(r.content)}</div>
+    ${causalHtml(r)}
     <div class="se-actions">
       <button class="btn sm" id="dVer">版本历史</button>
       <button class="btn sm" id="dEdit">编辑</button>
@@ -904,6 +983,7 @@ function drawDetail(){
   };
   $('dCopy').onclick=async()=>{try{await navigator.clipboard.writeText(r.id);toast('完整 id 已复制','ok')}
     catch(e){toast(e.message,'bad')}};
+  p.querySelectorAll('[data-causal]').forEach(b=>b.onclick=()=>openDetail(b.dataset.causal));
 }
 async function showVersions(id){
   try{
@@ -937,6 +1017,37 @@ async function renderTimeline(){
       || '<div class="empty"><strong>无记录</strong></div>';
     $('tl').querySelectorAll('[data-open]').forEach(b=>b.onclick=()=>{go('memory','search');setTimeout(()=>{SR.sel=b.dataset.open;openDetail(b.dataset.open)},0)});
   }catch(e){$('tl').innerHTML=`<div class="se-badbox">${esc(e.message)}</div>`}
+}
+
+/* ── 记忆 · 因果树 ── */
+let TR={from:'',nodes:[]};
+function treeRows(nodes,depth){
+  return (nodes||[]).map(n=>`<div class="row" style="padding-left:${depth*18}px">
+    <div class="row-main"><strong>${esc(n.title||'(无标题)')}</strong>
+      <span class="mono faint">${esc(n.id.slice(0,8))}${n.kind?' · '+esc(n.kind):''}${n.leaf?' · 叶':''}</span></div>
+    <div class="row-side"><button class="btn sm" data-open="${esc(n.id)}">看正文</button>
+      ${n.children&&n.children.length?`<button class="btn sm ghost" data-drill="${esc(n.id)}">下钻</button>`:''}</div>
+    </div>${treeRows(n.children,depth+1)}`).join('');
+}
+async function renderTree(){
+  $('pane').innerHTML=`<section class="panel"><div class="panel-head"><h2>因果树</h2>
+      <div class="inline"><span class="hint" id="trScope"></span>
+      <button class="btn sm" id="trRoot">回根</button></div></div>
+    <div id="trBox" class="muted">读取中…</div></section>`;
+  const load=async()=>{
+    try{
+      const d=await j('/api/tree'+(TR.from?('?from='+encodeURIComponent(TR.from)):''));
+      TR.nodes=d.nodes||[];
+      const count=ns=>(ns||[]).reduce((a,n)=>a+1+count(n.children),0);
+      $('trScope').textContent=TR.from?('自 '+(TR.from.slice(0,8))+' · '+count(TR.nodes)+' 节点'):(count(TR.nodes)+' 节点');
+      $('trBox').innerHTML=TR.nodes.length?`<div class="rows">${treeRows(TR.nodes,0)}</div>`
+        :'<div class="empty"><strong>无根节点——库内皆叶，因果树未成形</strong></div>';
+      $('trBox').querySelectorAll('[data-open]').forEach(b=>b.onclick=()=>{go('memory','search');setTimeout(()=>{SR.sel=b.dataset.open;openDetail(b.dataset.open)},0)});
+      $('trBox').querySelectorAll('[data-drill]').forEach(b=>b.onclick=()=>{TR.from=b.dataset.drill;load()});
+    }catch(e){$('trBox').innerHTML=`<div class="se-badbox">${esc(e.message)}</div>`}
+  };
+  $('trRoot').onclick=()=>{TR.from='';load()};
+  load();
 }
 
 /* ── 记忆 · 标签 · 项目 ── */

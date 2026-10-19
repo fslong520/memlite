@@ -1,6 +1,6 @@
 [package]
 name = "memlite"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "简化嵌入式记忆系统——JSONL 分块存储、BM25+语义双档检索、GitHub 同步、rules 注入"
 

@@ -264,7 +264,10 @@ fn handle(mut stream: TcpStream, emb: &Arc<Mutex<Embedder>>) -> Result<(), Strin
         if l.is_empty() {
             break;
         }
-        if let Some(v) = l.strip_prefix("Content-Length:") {
+        // RFC 9110 §5.1：字段名大小写不敏感。hyper/reqwest 等 Rust 客户端恒发
+        // 小写头（如 "content-length: 1517"），精确前缀匹配会漏读长度 → 空 body
+        // → 误报「body 不是合法 JSON」。改为小写化后匹配（2026-10-17 实证复现）。
+        if let Some(v) = l.to_ascii_lowercase().strip_prefix("content-length:") {
             content_len = v.trim().parse().unwrap_or(0);
         }
     }

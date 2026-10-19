@@ -1,5 +1,5 @@
 //! memlite CLI——简化嵌入式记忆系统（Rust 版）。
-//! 命令面：init/remember/recall/show/list/forget/sync/inject/reembed/status/compact/bench/web/embed-server。
+//! 命令面：init/remember/recall/show/list/forget/attach/demote/promote/chain/tree/sync/inject/reembed/status/compact/bench/web/embed-server。
 
 mod bench;
 mod config;
@@ -11,6 +11,7 @@ mod search;
 mod sensitive;
 mod store;
 mod sync;
+mod tree;
 mod vectors;
 mod web;
 
@@ -44,6 +45,9 @@ enum Cmd {
         tags: String,
         #[arg(long, default_value = "")]
         project: String,
+        /// 认因挂载：本条之因（父）——id/前8位/纲名皆可，显式挂载即意图（不判存）
+        #[arg(long, default_value = "")]
+        parent: String,
     },
     /// 检索（配了嵌入 API 走语义，否则词面 BM25）
     Recall {
@@ -65,6 +69,36 @@ enum Cmd {
     },
     /// 删记忆
     Forget { id: String },
+    /// 收编挂链：把子条挂到 --parent 之下（显式挂载即意图，不判存；父子即因果）
+    Attach {
+        id: String,
+        #[arg(long)]
+        parent: String,
+    },
+    /// 因果下沉：本条挂到 --parent 下成为其果（因果链延一层，防环）
+    Demote {
+        id: String,
+        #[arg(long)]
+        parent: String,
+    },
+    /// 因果上浮：本条升为更上游之因（挂到祖父/根，果链随之）
+    Promote { id: String },
+    /// 因果链深挖：一把取回整条链——因链全文（根在前）+ 本条 + 果链下探 --depth 层
+    Chain {
+        id: String,
+        /// 果链下探层数（缺省 3；0 = 只出因链与本条）
+        #[arg(long, default_value_t = 3)]
+        depth: usize,
+    },
+    /// 因果树：渲染森林或子树（--from 起点）；--outline 输出全深 id+标题 目录
+    Tree {
+        #[arg(long, default_value = "")]
+        from: String,
+        #[arg(long, default_value_t = 3)]
+        depth: usize,
+        #[arg(long)]
+        outline: bool,
+    },
     /// 就地改一条（同 id 追加新版本，末写胜出；未传的标题/正文/标签保留原值——显式 --title 即改标题）
     Update {
         id: String,
@@ -240,6 +274,50 @@ fn main() {
     std::process::exit(code);
 }
 
+/// attach/demote 共用：解析两端（id/前8位/纲名）→ 防自挂防环 → 改挂。
+/// demote=true 用「下沉」文案（同一 reparent 语义，对齐 respire attach/demote 双命令）。
+fn attach_like(dir: &PathBuf, json: bool, id: &str, parent: &str, demote: bool) -> i32 {
+    let mut s = Store::open(dir);
+    let (child_full, parent_full) = match (s.resolve(id), s.resolve(parent)) {
+        (Some(c), Some(p)) => (c.id.clone(), p.id.clone()),
+        (None, _) => {
+            eprintln!("记忆不存在: {id}");
+            return 1;
+        }
+        (_, None) => {
+            eprintln!("目标因（父）不存在: {parent}");
+            return 1;
+        }
+    };
+    if let Err(e) = s.reparent_checked(&child_full, &parent_full) {
+        eprintln!("{e}");
+        return 1;
+    }
+    if demote {
+        emit(
+            json,
+            serde_json::json!({"id": child_full, "parent": parent_full}),
+            &format!(
+                "⬇️ 因果下沉：{} 挂到 {} 之下成为其果（下游果链随迁）",
+                short(&child_full),
+                short(&parent_full)
+            ),
+        );
+    } else {
+        emit(
+            json,
+            serde_json::json!({"child": child_full, "parent": parent_full}),
+            &format!(
+                "🔗 已挂链：{} → 父 {}「{}」",
+                short(&child_full),
+                short(&parent_full),
+                s.get(&parent_full).map(|p| p.title.as_str()).unwrap_or("")
+            ),
+        );
+    }
+    0
+}
+
 fn run(cli: Cli, dir: &PathBuf) -> i32 {
     let json = cli.json;
     match cli.cmd {
@@ -288,7 +366,7 @@ fn run(cli: Cli, dir: &PathBuf) -> i32 {
             0
         }
 
-        Cmd::Remember { content, title, tags, project } => {
+        Cmd::Remember { content, title, tags, project, parent } => {
             // 写前敏感闸：明文口令/身份证/手机号/银行卡/token/私钥默认不入库
             let probe = format!("{title}\n{content}");
             let hits = sensitive::scan(&probe);
@@ -306,7 +384,19 @@ fn run(cli: Cli, dir: &PathBuf) -> i32 {
             };
             let tag_list: Vec<String> = tags.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect();
             let mut s = Store::open(dir);
-            let rid = match s.put(&content, &title, &tag_list, &project) {
+            // 认因：解析全长（id/前8位/纲名皆可），显式挂载不判存
+            let parent_full = if parent.is_empty() {
+                String::new()
+            } else {
+                match s.resolve(&parent) {
+                    Some(p) => p.id.clone(),
+                    None => {
+                        eprintln!("目标因（父）不存在: {parent}");
+                        return 1;
+                    }
+                }
+            };
+            let rid = match s.put_child(&content, &title, &tag_list, &project, &parent_full) {
                 Ok(id) => id,
                 Err(e) => {
                     eprintln!("{e}");
@@ -331,8 +421,20 @@ fn run(cli: Cli, dir: &PathBuf) -> i32 {
             }
             emit(
                 json,
-                serde_json::json!({"id": rid, "title": title, "embedded": embedded, "records": s.count()}),
-                &format!("已存 {rid}「{title}」{note}（共 {} 条）", s.count()),
+                serde_json::json!({
+                    "id": rid, "title": title, "embedded": embedded, "records": s.count(),
+                    "parent": parent_full,
+                }),
+                &format!(
+                    "已存 {rid}「{title}」{note}（共 {} 条）{}",
+                    s.count(),
+                    if parent_full.is_empty() {
+                        String::new()
+                    } else {
+                        format!("\n🔗 因果链挂载：本条之因（父）为 {}「{}」", short(&parent_full),
+                            s.get(&parent_full).map(|p| p.title.as_str()).unwrap_or(""))
+                    }
+                ),
             );
             0
         }
@@ -352,6 +454,8 @@ fn run(cli: Cli, dir: &PathBuf) -> i32 {
                 }
             }
             // 落检索日志：一次查询一行（含零命中与回退），失败只提示不拦检索
+            // 因果视界：命中沿因链上溯、果链下探（回退库的命中在回退库展示——链在彼库）
+            let causal_dir = if fallbacked { user_dir.clone() } else { dir.clone() };
             let entry = querylog::Entry {
                 ts: store::now_ts(),
                 query: query.clone(),
@@ -373,13 +477,33 @@ fn run(cli: Cli, dir: &PathBuf) -> i32 {
                 eprintln!("（检索日志写入失败：{e}）");
             }
             if json {
+                let cstore = Store::open(&causal_dir);
                 let arr: Vec<serde_json::Value> = hits
                     .iter()
                     .map(|(s, r)| {
+                        let ancestors: Vec<serde_json::Value> = cstore
+                            .ancestor_chain(&r.id)
+                            .into_iter()
+                            .filter(|pid| cstore.records.contains_key(pid))
+                            .map(|pid| {
+                                serde_json::json!({
+                                    "id": pid,
+                                    "title": cstore.records[&pid].title,
+                                })
+                            })
+                            .collect();
+                        let children: Vec<serde_json::Value> = cstore
+                            .children(&r.id)
+                            .iter()
+                            .map(|c| {
+                                serde_json::json!({"id": c.id, "title": c.title})
+                            })
+                            .collect();
                         serde_json::json!({
                             "score": (s * 10000.0).round() / 10000.0,
                             "id": r.id, "ts": r.ts, "title": r.title,
-                            "content": r.content, "tags": r.tags, "project": r.project
+                            "content": r.content, "tags": r.tags, "project": r.project,
+                            "ancestors": ancestors, "children": children
                         })
                     })
                     .collect();
@@ -399,6 +523,7 @@ fn run(cli: Cli, dir: &PathBuf) -> i32 {
                 if hits.is_empty() {
                     println!("（无命中）");
                 }
+                let cstore = Store::open(&causal_dir);
                 for (sc, r) in &hits {
                     let head = if r.title.is_empty() {
                         r.content.chars().take(40).collect::<String>()
@@ -407,6 +532,10 @@ fn run(cli: Cli, dir: &PathBuf) -> i32 {
                     };
                     let head = head.replace('\n', " ");
                     println!("[{sc:.3}] {}  {head}", r.id);
+                    // 因果视界：🔺因链+纲L1+🔻果——查因及果，命中即知链影响
+                    for line in tree::causal_lines(&cstore, &r.id) {
+                        println!("{line}");
+                    }
                 }
             }
             0
@@ -501,15 +630,44 @@ fn run(cli: Cli, dir: &PathBuf) -> i32 {
                 eprintln!("记忆不存在: {id}");
                 return 1;
             };
+            let rid = r.id.clone();
             if json {
-                // 原样输出该条 JSON
-                let v = serde_json::to_value(r).unwrap();
+                // 原样输出该条 JSON + 因果邻居（对齐 respire show --json：entry/ancestors/children）
+                let mut v = serde_json::to_value(r).unwrap();
+                let title_of = |pid: &str| -> String {
+                    s.records
+                        .get(pid)
+                        .map(|p| if p.title.is_empty() { short(pid).to_string() } else { p.title.clone() })
+                        .unwrap_or_else(|| short(pid).to_string())
+                };
+                let ancestors: Vec<serde_json::Value> = s
+                    .ancestor_chain(&rid)
+                    .into_iter()
+                    .filter(|pid| s.records.contains_key(pid))
+                    .map(|pid| serde_json::json!({"id": pid, "title": title_of(&pid)}))
+                    .collect();
+                let children: Vec<serde_json::Value> = s
+                    .children(&rid)
+                    .iter()
+                    .map(|c| {
+                        serde_json::json!({
+                            "id": c.id,
+                            "title": c.title,
+                            "summary": c.content.chars().take(80).collect::<String>(),
+                        })
+                    })
+                    .collect();
+                v["ancestors"] = serde_json::json!(ancestors);
+                v["children"] = serde_json::json!(children);
                 println!("{}", serde_json::to_string_pretty(&v).unwrap());
             } else {
                 println!(
                     "id: {}\ncreated: {}\ntitle: {}\ntags: {}\nproject: {}\n---\n{}",
                     r.id, r.ts, r.title, r.tags.join(", "), r.project, r.content
                 );
+                for line in tree::causal_lines(&s, &rid) {
+                    println!("{line}");
+                }
             }
             0
         }
@@ -548,6 +706,204 @@ fn run(cli: Cli, dir: &PathBuf) -> i32 {
             }
             emit(json, serde_json::json!({"deleted": rid}), &format!("已删 {rid}"));
             0
+        }
+
+        Cmd::Attach { id, parent } => attach_like(dir, json, &id, &parent, false),
+        Cmd::Demote { id, parent } => attach_like(dir, json, &id, &parent, true),
+
+        Cmd::Promote { id } => {
+            let mut s = Store::open(dir);
+            let Some(me) = s.resolve(&id).map(|r| r.clone()) else {
+                eprintln!("记忆不存在: {id}");
+                return 1;
+            };
+            if me.parent_id().is_empty() {
+                emit(
+                    json,
+                    serde_json::json!({"id": me.id, "new_parent": ""}),
+                    "已是根（无因）——无可上浮",
+                );
+                return 0;
+            }
+            let old_parent = me.parent_id().to_string();
+            // 新因 = 原因的因（祖父）；祖父不在库则升根
+            let grandparent = s
+                .records
+                .get(&old_parent)
+                .map(|p| p.parent_id().to_string())
+                .unwrap_or_default();
+            if let Err(e) = s.reparent_checked(&me.id, &grandparent) {
+                eprintln!("{e}");
+                return 1;
+            }
+            emit(
+                json,
+                serde_json::json!({"id": me.id, "new_parent": grandparent}),
+                &format!(
+                    "⬆️ 因果上浮：{} {}（本条之果随迁，因果层级上移）",
+                    short(&me.id),
+                    if grandparent.is_empty() {
+                        "升为根（自为因）".to_owned()
+                    } else {
+                        format!("挂到因 {} 下", short(&grandparent))
+                    }
+                ),
+            );
+            0
+        }
+
+        Cmd::Chain { id, depth } => {
+            let s = Store::open(dir);
+            let Some(r) = s.resolve(&id) else {
+                eprintln!("记忆不存在: {id}");
+                return 1;
+            };
+            let rid = r.id.clone();
+            let view = match tree::chain_view(&s, &rid, depth) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return 1;
+                }
+            };
+            if json {
+                let anc: Vec<serde_json::Value> = view
+                    .ancestors
+                    .iter()
+                    .map(|a| serde_json::json!({"id": a.id, "title": a.title, "content": a.content}))
+                    .collect();
+                let des: Vec<serde_json::Value> = view
+                    .descendants
+                    .iter()
+                    .map(|(lv, d)| serde_json::json!({"level": lv, "id": d.id, "title": d.title, "content": d.content}))
+                    .collect();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "entry": {"id": view.entry.id, "title": view.entry.title, "content": view.entry.content},
+                        "ancestors": anc,
+                        "descendants": des,
+                    }))
+                    .unwrap()
+                );
+                return 0;
+            }
+            println!("🔗 因果链（自 {}）", short(&rid));
+            if view.ancestors.is_empty() {
+                println!("   （无因——本条为根/纲）");
+            } else {
+                println!("   🔺因链（{} 层，根在前）：", view.ancestors.len());
+                for a in &view.ancestors {
+                    let t = if a.title.is_empty() { short(&a.id).to_string() } else { a.title.clone() };
+                    println!("\n   ┌─ [{}] {t}", short(&a.id));
+                    for line in a.content.lines() {
+                        println!("   │ {line}");
+                    }
+                }
+            }
+            {
+                let e = view.entry;
+                let t = if e.title.is_empty() { short(&e.id).to_string() } else { e.title.clone() };
+                println!("\n   ◆ 本条 [{}] {t}", short(&e.id));
+                for line in e.content.lines() {
+                    println!("   │ {line}");
+                }
+            }
+            if depth == 0 {
+                return 0;
+            }
+            if view.descendants.is_empty() {
+                println!("\n   （无果——本条为叶）");
+            } else {
+                println!("\n   🔻果链（{} 条，下探 {depth} 层）：", view.descendants.len());
+                for (lv, d) in &view.descendants {
+                    let t = if d.title.is_empty() { short(&d.id).to_string() } else { d.title.clone() };
+                    println!("\n   {}┌─ L{lv} [{}] {t}", "  ".repeat(lv - 1), short(&d.id));
+                    for line in d.content.lines() {
+                        println!("   {}│ {line}", "  ".repeat(lv - 1));
+                    }
+                }
+            }
+            0
+        }
+
+        Cmd::Tree { from, depth, outline: ol } => {
+            let s = Store::open(dir);
+            let scope = tree::TreeScope::build(&s);
+            // --from 支持 id/前8位/纲名（先全库解析再入作用域）
+            let from_full = if from.is_empty() {
+                None
+            } else {
+                match s.resolve(&from) {
+                    Some(r) => Some(r.id.clone()),
+                    None => {
+                        eprintln!("记忆不存在: {from}");
+                        return 1;
+                    }
+                }
+            };
+            if ol {
+                match tree::outline(&scope, from_full.as_deref()) {
+                    Ok((lines, n)) => {
+                        if json {
+                            let rows: Vec<serde_json::Value> = lines
+                                .iter()
+                                .enumerate()
+                                .map(|(i, l)| serde_json::json!({"i": i, "line": l}))
+                                .collect();
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&serde_json::json!({"nodes": rows, "count": n})).unwrap()
+                            );
+                        } else {
+                            for l in &lines {
+                                println!("{l}");
+                            }
+                            eprintln!("—— 共 {n} 节点");
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("{e}");
+                        return 1;
+                    }
+                }
+                return 0;
+            }
+            if json {
+                match tree::tree_json(&scope, from_full.as_deref()) {
+                    Ok(nodes) => {
+                        fn to_json(n: &tree::TreeNode) -> serde_json::Value {
+                            serde_json::json!({
+                                "id": n.id, "title": n.title, "kind": n.kind,
+                                "level": n.level, "leaf": n.leaf,
+                                "children": n.children.iter().map(to_json).collect::<Vec<_>>(),
+                            })
+                        }
+                        let arr: Vec<serde_json::Value> = nodes.iter().map(to_json).collect();
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({"nodes": arr})).unwrap()
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("{e}");
+                        return 1;
+                    }
+                }
+                return 0;
+            }
+            match tree::render_tree(&scope, from_full.as_deref(), depth) {
+                Ok(lines) => {
+                    for l in &lines {
+                        println!("{l}");
+                    }
+                    0
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    1
+                }
+            }
         }
 
         Cmd::Update { id, title, content, tags } => {
